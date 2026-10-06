@@ -110,41 +110,7 @@ map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
 shared <- SharedData$new(map_data)
 ```
 
-## Row {height="15%"}
-
-```{r}
-#| content: valuebox
-#| title: "Total listings"
-list(icon = "house", color = "light", value = n_total)
-```
-
-```{r}
-#| content: valuebox
-#| title: "Active"
-list(icon = "check-circle", color = "success", value = n_active)
-```
-
-```{r}
-#| content: valuebox
-#| title: "Avg price"
-list(
-  icon  = "tag",
-  color = "info",
-  value = if (!is.na(avg_price)) paste0("CHF ", avg_price, "k") else "—"
-)
-```
-
-```{r}
-#| content: valuebox
-#| title: "Price range"
-list(
-  icon  = "arrow-left-right",
-  color = "light",
-  value = if (!is.na(min_price)) paste0("CHF ", min_price, "k – ", max_price, "k") else "—"
-)
-```
-
-## Row {height="85%" .tabset}
+## Row {.tabset}
 
 ### Properties
 
@@ -180,25 +146,42 @@ datatable(
 ### Map
 
 ```{r}
-pal <- colorNumeric("Blues", domain = na.omit(map_data$Price), na.color = "grey70")
+# Swisstopo WMTS raster tiles (EPSG:3857 / Web Mercator)
+sw_attr <- '\u00a9 <a href="https://www.swisstopo.admin.ch">swisstopo</a>'
+sw_tile <- function(layer, ext = "jpeg")
+  paste0("https://wmts.geo.admin.ch/1.0.0/", layer,
+         "/default/current/3857/{z}/{x}/{y}.", ext)
 
 leaflet(shared) |>
-  addProviderTiles(providers$OpenStreetMap) |>
-  addCircleMarkers(
-    lng         = ~lng,
-    lat         = ~lat,
-    radius      = 8,
-    color       = "white",
-    weight      = 1,
-    fillColor   = ~pal(Price),
-    fillOpacity = 0.85,
-    popup       = ~popup_html
+  addTiles(
+    urlTemplate = sw_tile("ch.swisstopo.pixelkarte-grau"),
+    attribution = sw_attr,
+    group = "Swisstopo Grey"
   ) |>
-  addLegend(
-    position = "bottomright",
-    pal      = pal,
-    values   = na.omit(map_data$Price),
-    title    = "Price (kCHF)",
-    na.label = "—"
+  addTiles(
+    urlTemplate = sw_tile("ch.swisstopo.pixelkarte-farbe"),
+    attribution = sw_attr,
+    group = "Swisstopo Colour"
+  ) |>
+  addTiles(
+    urlTemplate = sw_tile("ch.swisstopo.swissimage"),
+    attribution = sw_attr,
+    group = "Aerial"
+  ) |>
+  addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") |>
+  addCircleMarkers(
+    lng            = ~lng,
+    lat            = ~lat,
+    radius         = 12,
+    color          = "#333",
+    weight         = 2,
+    fillColor      = "#e05c1a",
+    fillOpacity    = 0.9,
+    popup          = ~popup_html,
+    clusterOptions = markerClusterOptions(maxClusterRadius = 40)
+  ) |>
+  addLayersControl(
+    baseGroups = c("Swisstopo Grey", "Swisstopo Colour", "Aerial", "OpenStreetMap"),
+    options    = layersControlOptions(collapsed = FALSE)
   )
 ```

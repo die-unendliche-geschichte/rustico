@@ -236,7 +236,8 @@ parse_property_text <- function(text) {
     kanalisation       = "Kanalisation(?:ierung)?",
     garden             = "Garten(?:fl\u00e4che|sitzplatz)?",
     balcony            = "Balkon(?:fl\u00e4che|e)?",
-    terrace            = "Terrassen?(?:fl\u00e4che)?"
+    terrace            = "Terrassen?(?:fl\u00e4che)?",
+    ortschaft          = "Ortschaft"
   )
 
   all_labels_pat <- paste(labels, collapse = "|")
@@ -262,17 +263,24 @@ parse_property_text <- function(text) {
   pre_label <- if (first_label_pos[1] > 1) trimws(substr(text, 1, first_label_pos[1] - 1)) else ""
   result$description <- if (nzchar(pre_label)) pre_label else NA_character_
 
-  # ── Postal code fallback: derive from Adresse field on detail pages ──────────
-  if (is.na(postal_code) && !is.na(result$address)) {
-    addr_m <- regmatches(result$address,
-      regexec("^([0-9]{4})\\s+(.+)$", trimws(result$address)))[[1]]
-    if (length(addr_m) >= 3) {
-      postal_code <- addr_m[2]
-      # Strip run-on text: break at first lowercase→uppercase boundary (e.g. "CugnascoKaufpreis")
-      city <- trimws(sub("([a-z\u00e4\u00f6\u00fc\u00df])([A-Z\u00c4\u00d6\u00dc]).*$",
-                         "\\1", addr_m[3], perl = TRUE))
-      if (!nzchar(city)) city <- NA_character_
-    }
+  # ── Postal code: Ortschaft overrides inline PLZ/ORT; Adresse is last resort ───
+  # Ortschaft on detail pages names the actual property location.  The inline
+  # card summary (PLZ, ORT) can reflect the broker's city or the listing-category
+  # municipality (e.g. "6600 Locarno" for a property actually in Ponte Brolla).
+  # Card-only parses have no Ortschaft field, so inline remains authoritative there.
+  extract_plz_city <- function(raw) {
+    m <- regmatches(raw, regexec("([0-9]{4})\\s+(.+)$", trimws(raw)))[[1]]
+    if (length(m) < 3) return(NULL)
+    city_part <- trimws(sub("([a-z\u00e4\u00f6\u00fc\u00df])([A-Z\u00c4\u00d6\u00dc]).*$",
+                            "\\1", m[3], perl = TRUE))
+    list(plz = m[2], city = if (nzchar(city_part)) city_part else NA_character_)
+  }
+  if (!is.na(result$ortschaft)) {
+    derived <- extract_plz_city(result$ortschaft)
+    if (!is.null(derived)) { postal_code <- derived$plz; city <- derived$city }
+  } else if (is.na(postal_code) && !is.na(result$address)) {
+    derived <- extract_plz_city(result$address)
+    if (!is.null(derived)) { postal_code <- derived$plz; city <- derived$city }
   }
   result$postal_code <- postal_code
   result$city        <- city
@@ -663,48 +671,30 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
   cat("Total properties parsed:", total, "\n")
 }
 
-# ── Step 3: Scrape detail pages ────────────────────────────────────────────────
+# ── Step 3a: Parse already-fetched detail pages ────────────────────────────────
 
-# Fetch each property's individual listing page, store the full text in
-# raw_properties.detail_text, and update the properties row with any richer
-# data found there (full description, object number, address, rooms, etc.).
-# Resumable: rows with detail_scraped_at already set are skipped.
-scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1) {
+# Re-parse detail_text stored in raw_properties and update properties.
+# Run this any time parsing logic changes — no network calls needed.
+parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
   con <- init_db(db_path)
   on.exit(dbDisconnect(con), add = TRUE)
 
   todo <- dbGetQuery(con, "
-    SELECT p.id AS prop_id, r.id AS raw_id, r.property_link
+    SELECT p.id AS prop_id, r.detail_text
     FROM properties p
     JOIN raw_properties r ON r.id = p.raw_id
-    WHERE r.property_link IS NOT NULL
-      AND r.detail_scraped_at IS NULL
+    WHERE r.detail_text IS NOT NULL
     ORDER BY r.page, r.position
   ")
 
-  cat("=== SCRAPING DETAIL PAGES ===\n")
-  cat("Properties to scrape:", nrow(todo), "\n\n")
+  cat("=== PARSING DETAIL PAGES ===\n")
+  cat("Properties to parse:", nrow(todo), "\n")
 
   for (i in seq_len(nrow(todo))) {
-    row <- todo[i, ]
-    cat("[", i, "/", nrow(todo), "]", basename(row$property_link), "...")
+    row         <- todo[i, ]
+    detail_text <- row$detail_text
 
-    page <- scrape_with_retry(row$property_link)
-    if (is.null(page)) { cat(" Failed\n"); next }
-
-    # Extract text: try common content containers, fall back to body
-    detail_text <- NULL
-    for (sel in c(".estate-item", ".estate-detail", ".property-detail",
-                  ".property-content", "main", "body")) {
-      el <- page %>% html_elements(sel)
-      if (length(el) > 0) {
-        detail_text <- el[[1]] %>% html_text(trim = TRUE)
-        break
-      }
-    }
-    if (is.null(detail_text) || !nzchar(detail_text)) { cat(" No content\n"); next }
-
-    # Extract German description from Beschreibung heading (detail pages only)
+    # Extract German description from Beschreibung heading
     desc_parts <- strsplit(detail_text, "\\n{1,3}Beschreibung\\n{1,3}", perl = TRUE)[[1]]
     detail_description <- if (length(desc_parts) >= 2) {
       after <- desc_parts[[length(desc_parts)]]
@@ -715,23 +705,13 @@ scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1
     if (is.na(detail_description) || !nzchar(detail_description))
       detail_description <- NA_character_
 
-    # Store raw detail text and mark as scraped
-    dbExecute(con,
-      "UPDATE raw_properties
-       SET detail_text = ?, detail_scraped_at = CURRENT_TIMESTAMP
-       WHERE id = ?",
-      list(detail_text, row$raw_id)
-    )
-
-    # Isolate property data block — skip navigation and broker contact section
-    # (broker's "Adresse:" would otherwise shadow the property address)
+    # Isolate property data block — skip navigation / broker contact section
     parse_text <- detail_text
     for (marker in c("Objekt Nummer:", "PLZ, ORT :")) {
       pos <- regexpr(marker, detail_text, fixed = TRUE)
       if (pos[1] > 0) { parse_text <- substr(detail_text, pos[1], nchar(detail_text)); break }
     }
 
-    # Re-parse and update properties; prefer detail values, keep card values as fallback
     parsed <- parse_property_text(parse_text)
     dbExecute(con, "
       UPDATE properties SET
@@ -739,8 +719,8 @@ scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1
         object_type        = COALESCE(?, object_type),
         state              = COALESCE(?, state),
         address            = COALESCE(?, address),
-        postal_code        = COALESCE(?, postal_code),
-        city               = COALESCE(?, city),
+        postal_code        = ?,
+        city               = ?,
         purchase_price     = COALESCE(?, purchase_price),
         price_chf          = COALESCE(?, price_chf),
         living_area        = COALESCE(?, living_area),
@@ -813,6 +793,56 @@ scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1
         row$prop_id
       )
     )
+  }
+
+  cat("=== DETAIL PARSING COMPLETE ===\n")
+  cat("Parsed", nrow(todo), "properties\n")
+}
+
+# ── Step 3b: Scrape detail pages ───────────────────────────────────────────────
+
+# Fetch each property's detail page and store the raw text. Resumable: rows
+# with detail_scraped_at already set are skipped. Calls parse_detail_pages()
+# when done so results are immediately available.
+scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1) {
+  con <- init_db(db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  todo <- dbGetQuery(con, "
+    SELECT r.id AS raw_id, r.property_link
+    FROM raw_properties r
+    WHERE r.property_link IS NOT NULL
+      AND r.detail_scraped_at IS NULL
+    ORDER BY r.page, r.position
+  ")
+
+  cat("=== SCRAPING DETAIL PAGES ===\n")
+  cat("Pages to fetch:", nrow(todo), "\n\n")
+
+  for (i in seq_len(nrow(todo))) {
+    row <- todo[i, ]
+    cat("[", i, "/", nrow(todo), "]", basename(row$property_link), "...")
+
+    page <- scrape_with_retry(row$property_link)
+    if (is.null(page)) { cat(" Failed\n"); next }
+
+    detail_text <- NULL
+    for (sel in c(".estate-item", ".estate-detail", ".property-detail",
+                  ".property-content", "main", "body")) {
+      el <- page %>% html_elements(sel)
+      if (length(el) > 0) {
+        detail_text <- el[[1]] %>% html_text(trim = TRUE)
+        break
+      }
+    }
+    if (is.null(detail_text) || !nzchar(detail_text)) { cat(" No content\n"); next }
+
+    dbExecute(con,
+      "UPDATE raw_properties
+       SET detail_text = ?, detail_scraped_at = CURRENT_TIMESTAMP
+       WHERE id = ?",
+      list(detail_text, row$raw_id)
+    )
 
     cat(" OK\n")
     Sys.sleep(delay)
@@ -820,8 +850,11 @@ scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1
 
   n_done <- dbGetQuery(con,
     "SELECT COUNT(*) AS n FROM raw_properties WHERE detail_scraped_at IS NOT NULL")$n
-  cat("\n=== DETAIL SCRAPING COMPLETE ===\n")
-  cat("Total detail pages scraped:", n_done, "\n")
+  cat("\n=== FETCHING COMPLETE: ", n_done, "detail pages stored ===\n")
+
+  dbDisconnect(con)
+  on.exit(NULL)   # prevent double-disconnect
+  parse_detail_pages(db_path)
 }
 
 # ── Step 4: Apply keywords ─────────────────────────────────────────────────────
