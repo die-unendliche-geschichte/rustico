@@ -196,7 +196,7 @@ leaflet(shared) |>
       color       = "#000",
       weight      = 3,
       fillOpacity = 0.6,
-      bringToFront = TRUE
+      bringToFront = FALSE
     )
   ) |>
   addCircleMarkers(
