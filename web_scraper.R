@@ -680,7 +680,7 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
   on.exit(dbDisconnect(con), add = TRUE)
 
   todo <- dbGetQuery(con, "
-    SELECT p.id AS prop_id, r.detail_text
+    SELECT p.id AS prop_id, r.detail_text, r.raw_text
     FROM properties p
     JOIN raw_properties r ON r.id = p.raw_id
     WHERE r.detail_text IS NOT NULL
@@ -713,6 +713,21 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
     }
 
     parsed <- parse_property_text(parse_text)
+
+    # Sanity-check the ortschaft-derived PLZ against the card's inline PLZ.
+    # The card's "PLZ, ORT : XXXX City" is reliable; ortschaft can accidentally
+    # capture the broker's city (different Swiss region, different first digit).
+    card_m <- regmatches(row$raw_text,
+                         regexec("PLZ, ORT : ([0-9]{4})", row$raw_text))[[1]]
+    card_plz <- if (length(card_m) >= 2) card_m[2] else NA_character_
+    if (!is.na(parsed$postal_code) && !is.na(card_plz) &&
+        substr(parsed$postal_code, 1, 1) != substr(card_plz, 1, 1)) {
+      # Ortschaft PLZ is in a different Swiss region — almost certainly wrong.
+      # Fall back to the card PLZ so we at least geolocate to the right area.
+      parsed$postal_code <- card_plz
+      parsed$city        <- NA_character_
+    }
+
     dbExecute(con, "
       UPDATE properties SET
         object_number      = COALESCE(?, object_number),
