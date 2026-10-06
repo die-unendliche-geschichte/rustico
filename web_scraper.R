@@ -1085,7 +1085,9 @@ geolocate <- function(db_path  = "rustico_properties.sqlite",
 
   con <- dbConnect(SQLite(), db_path)
   on.exit(dbDisconnect(con), add = TRUE)
-  init_db(db_path)   # ensure lat/lon columns exist
+  existing <- dbListFields(con, "properties")
+  if (!"lat" %in% existing) dbExecute(con, "ALTER TABLE properties ADD COLUMN lat REAL")
+  if (!"lon" %in% existing) dbExecute(con, "ALTER TABLE properties ADD COLUMN lon REAL")
 
   props <- dbGetQuery(con, "SELECT id, postal_code FROM properties WHERE postal_code IS NOT NULL AND postal_code != ''")
   joined <- merge(props, lookup, by = "postal_code", all.x = TRUE)
