@@ -237,7 +237,7 @@ parse_property_text <- function(text) {
     garden             = "Garten(?:fl\u00e4che|sitzplatz)?",
     balcony            = "Balkon(?:fl\u00e4che|e)?",
     terrace            = "Terrassen?(?:fl\u00e4che)?",
-    ortschaft          = "Ortschaft"
+    ortschaft          = "Ort(?:schaft)?"
   )
 
   all_labels_pat <- paste(labels, collapse = "|")
