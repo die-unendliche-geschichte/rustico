@@ -186,7 +186,7 @@ parse_property_text <- function(text) {
 init_db <- function(db_path) {
   con <- dbConnect(SQLite(), db_path)
 
-  # Raw scraped data — append-only, never mutated after insert
+  # Raw scraped data — scraped_at = first seen, last_seen = most recently seen
   dbExecute(con, "
     CREATE TABLE IF NOT EXISTS raw_properties (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,9 +195,18 @@ init_db <- function(db_path) {
       property_link TEXT UNIQUE,
       image_url     TEXT,
       raw_text      TEXT,
-      scraped_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+      scraped_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen     DATETIME DEFAULT CURRENT_TIMESTAMP,
+      is_active     INTEGER  DEFAULT 1
     )
   ")
+
+  # Migrate existing databases
+  existing_raw_cols <- dbListFields(con, "raw_properties")
+  if (!"last_seen"  %in% existing_raw_cols)
+    dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN last_seen DATETIME DEFAULT CURRENT_TIMESTAMP")
+  if (!"is_active"  %in% existing_raw_cols)
+    dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN is_active INTEGER DEFAULT 1")
 
   # Structured data derived from raw_properties — can be dropped and rebuilt
   dbExecute(con, "
@@ -240,6 +249,15 @@ init_db <- function(db_path) {
       items_found INTEGER,
       scraped_at  DATETIME DEFAULT CURRENT_TIMESTAMP
     )
+  ")
+
+  # Convenience view: parsed properties joined with active/last_seen from raw
+  dbExecute(con, "
+    CREATE VIEW IF NOT EXISTS active_properties AS
+    SELECT p.*, r.last_seen, r.is_active
+    FROM properties p
+    JOIN raw_properties r ON r.id = p.raw_id
+    WHERE r.is_active = 1
   ")
 
   con
@@ -334,9 +352,10 @@ scrape_raw <- function(max_pages = 233, items_per_page = 2,
             "INSERT INTO raw_properties (page, position, property_link, image_url, raw_text)
              VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(property_link) DO UPDATE SET
-               image_url  = excluded.image_url,
-               raw_text   = excluded.raw_text,
-               scraped_at = CURRENT_TIMESTAMP",
+               image_url = excluded.image_url,
+               raw_text  = excluded.raw_text,
+               last_seen = CURRENT_TIMESTAMP,
+               is_active = 1",
             list(page_idx + 1, i, property_link, image_url, raw_text)
           ),
           error = function(e) cat("  DB write error:", e$message, "\n")
@@ -472,6 +491,37 @@ apply_keywords <- function(db_path   = "rustico_properties.sqlite",
   n_bl  <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties WHERE is_blacklisted = 1")$n
   n_int <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties WHERE interesting_keywords IS NOT NULL")$n
   cat("Done.", n_bl, "blacklisted,", n_int, "flagged as interesting.\n")
+}
+
+# ── Active status ──────────────────────────────────────────────────────────────
+
+# Mark properties as inactive if they have not been seen within max_age_days.
+# Run after scrape_raw() once a full scrape cycle has completed.
+# Properties absent from the site simply stop getting their last_seen updated,
+# so after one full cycle they will fall outside the window and be marked inactive.
+update_active_status <- function(db_path = "rustico_properties.sqlite",
+                                 max_age_days = 30) {
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  dbExecute(con,
+    "UPDATE raw_properties
+     SET is_active = CASE
+       WHEN last_seen >= datetime('now', ?) THEN 1
+       ELSE 0
+     END",
+    list(paste0("-", max_age_days, " days"))
+  )
+
+  counts <- dbGetQuery(con, "
+    SELECT is_active, COUNT(*) AS n FROM raw_properties GROUP BY is_active
+  ")
+  n_active   <- counts$n[counts$is_active == 1]
+  n_inactive <- counts$n[counts$is_active == 0]
+  if (length(n_active)   == 0) n_active   <- 0L
+  if (length(n_inactive) == 0) n_inactive <- 0L
+  cat("Active:", n_active, "  Inactive:", n_inactive,
+      " (threshold:", max_age_days, "days)\n")
 }
 
 # ── Trial run helper ───────────────────────────────────────────────────────────
@@ -622,6 +672,7 @@ export_to_csv <- function(db_path = "rustico_properties.sqlite",
 # Only run when executed directly (Rscript web_scraper.R), not when sourced
 if (sys.nframe() == 0) {
   scrape_raw(max_pages = 233, items_per_page = 2)
+  update_active_status()
   parse_and_enrich()
   apply_keywords()
   export_to_csv()
