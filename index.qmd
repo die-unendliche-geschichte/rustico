@@ -115,14 +115,14 @@ map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
   )
 
 shared <- SharedData$new(map_data)
-```
 
-```{css}
-table.dataTable tbody td {
-  max-height: 4.5em;
-  overflow: hidden;
-  vertical-align: top;
-}
+htmltools::tags$style("
+  table.dataTable tbody td {
+    height: 3em;
+    overflow: hidden;
+    vertical-align: top;
+  }
+")
 ```
 
 ## Row {.tabset}
