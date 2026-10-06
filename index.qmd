@@ -70,32 +70,41 @@ centroid_df <- data.frame(postal_code = zip_cents$postal_code,
 # One row per property with display columns + coordinates for crosstalk
 map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
   dplyr::transmute(
-    Location    = paste0(postal_code, " ", city),
-    Region      = region,
-    Price       = ifelse(!is.na(price_chf),
-                         formatC(price_chf, format = "f", digits = 0, big.mark = "'"),
-                         purchase_price),
-    price_num   = price_chf,
-    `Living m²` = living_area_m2,
-    `Plot m²`   = plot_area_m2,
-    Rooms       = rooms_n,
-    Floors      = floors_n,
-    Condition   = condition,
-    Lage        = lage,
-    Ausblick    = ausblick,
-    Keywords    = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
-    Blacklist   = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
-    Link        = paste0('<a href="', property_link, '" target="_blank">open</a>'),
-    popup_html  = paste0(
+    Location        = paste0(postal_code, " ", city),
+    Region          = region,
+    Price           = round(price_chf / 1000),
+    `Living m²`     = living_area_m2,
+    `Plot m²`       = plot_area_m2,
+    Rooms           = rooms_n,
+    WC              = wc_n,
+    `Bäder`         = bathrooms_n,
+    Floors          = floors_n,
+    Baujahr         = build_year_n,
+    Condition       = condition,
+    Zweitwohnsitz   = secondary_home,
+    Parking         = parking,
+    Lage            = lage,
+    Ausblick        = ausblick,
+    `ÖV (m)`        = public_transport_m,
+    `Autobahn (km)` = dist_highway_km,
+    `Stadt (km)`    = dist_city_km,
+    Schulen         = schools,
+    Garten          = garden,
+    Keywords        = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
+    Blacklist       = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
+    Link            = paste0('<a href="', property_link, '" target="_blank">open</a>'),
+    popup_html      = paste0(
       "<b>", paste0(postal_code, " ", city), "</b><br>",
       "CHF ", ifelse(!is.na(price_chf),
                      formatC(price_chf, format = "f", digits = 0, big.mark = "'"), "—"),
       "<br>",
+      ifelse(!is.na(rooms_n), paste0(rooms_n, " Zimmer<br>"), ""),
       ifelse(!is.na(living_area_m2), paste0(living_area_m2, " m² living<br>"), ""),
+      ifelse(!is.na(condition), paste0(condition, "<br>"), ""),
       '<a href="', property_link, '" target="_blank">open listing</a>'
     ),
-    lat         = map_lat,
-    lng         = map_lng
+    lat             = map_lat,
+    lng             = map_lng
   )
 
 shared <- SharedData$new(map_data)
@@ -151,9 +160,8 @@ datatable(
     pageLength = 25,
     order      = list(list(2, "asc")),   # sort by price ascending
     columnDefs = list(
-      list(targets = 3,             visible = FALSE),  # price_num (numeric, for map)
-      list(targets = 12,            visible = FALSE),  # Blacklist
-      list(targets = c(14, 15, 16), visible = FALSE)   # popup_html, lat, lng
+      list(targets = 21,            visible = FALSE),  # Blacklist
+      list(targets = c(23, 24, 25), visible = FALSE)   # popup_html, lat, lng
     )
   )
 ) |>
@@ -172,7 +180,7 @@ datatable(
 ### Map
 
 ```{r}
-pal <- colorNumeric("Blues", domain = na.omit(map_data$price_num), na.color = "grey70")
+pal <- colorNumeric("Blues", domain = na.omit(map_data$Price), na.color = "grey70")
 
 leaflet(shared) |>
   addProviderTiles(providers$OpenStreetMap) |>
@@ -182,15 +190,15 @@ leaflet(shared) |>
     radius      = 8,
     color       = "white",
     weight      = 1,
-    fillColor   = ~pal(price_num),
+    fillColor   = ~pal(Price),
     fillOpacity = 0.85,
     popup       = ~popup_html
   ) |>
   addLegend(
     position = "bottomright",
     pal      = pal,
-    values   = na.omit(map_data$price_num),
-    title    = "Price (CHF)",
+    values   = na.omit(map_data$Price),
+    title    = "Price (kCHF)",
     na.label = "—"
   )
 ```
