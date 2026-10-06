@@ -4,6 +4,25 @@ library(httr)
 library(DBI)
 library(RSQLite)
 
+# ── Keyword configuration ──────────────────────────────────────────────────────
+# Matching is case-insensitive and substring-based.
+
+KEYWORDS_BLACKLIST <- tolower(c(
+  "dorfrustico"
+  # add more terms to exclude here
+))
+
+KEYWORDS_INTERESTING <- tolower(c(
+  "alleinlage",
+  "ruhelage",
+  "panorama",
+  "aussicht",
+  "vista",
+  "quiete",
+  "nucleo"
+  # add more terms of interest here
+))
+
 # ── Image download ─────────────────────────────────────────────────────────────
 
 download_image <- function(image_url, filename) {
@@ -77,6 +96,14 @@ scrape_links <- function(url, link_selector = "a") {
 
 # ── Property text parsing ──────────────────────────────────────────────────────
 
+# Return a comma-separated string of keywords found in text, or NA if none match
+match_keywords <- function(text, keywords) {
+  if (is.null(text) || is.na(text) || !nzchar(text)) return(NA_character_)
+  text_lower <- tolower(text)
+  matched <- keywords[vapply(keywords, function(kw) grepl(kw, text_lower, fixed = TRUE), logical(1))]
+  if (length(matched) == 0) NA_character_ else paste(matched, collapse = ", ")
+}
+
 # Extract a numeric area value from strings like "ca. 100,00 m²" or "59,00 m²"
 extract_m2 <- function(x) {
   if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
@@ -91,7 +118,9 @@ extract_m2 <- function(x) {
 # spaced-out key/value format ("Kaufpreis:\nCHF 59.000,-\n...") by
 # normalising whitespace first, then using all known label names as
 # look-ahead anchors so each field value stops at the next label.
-parse_property_text <- function(text) {
+parse_property_text <- function(text,
+                               blacklist   = KEYWORDS_BLACKLIST,
+                               interesting = KEYWORDS_INTERESTING) {
   text <- gsub("\\s+", " ", trimws(text))
 
   labels <- c(
@@ -123,6 +152,20 @@ parse_property_text <- function(text) {
       result[[col_name]] <- trimws(sub(strip_pat, "", m, perl = TRUE))
     }
   }
+
+  # Extract free-text description: everything before the first known label
+  first_label_pos <- regexpr(paste0("(?i)(?:", all_labels_pat, ")"), text, perl = TRUE)
+  result$description <- if (first_label_pos[1] > 1) {
+    trimws(substr(text, 1, first_label_pos[1] - 1))
+  } else {
+    NA_character_
+  }
+
+  # Keyword matching against description + full text
+  search_text <- paste(result$description, text, sep = " ")
+  result$blacklist_keywords   <- match_keywords(search_text, blacklist)
+  result$interesting_keywords <- match_keywords(search_text, interesting)
+  result$is_blacklisted       <- as.integer(!is.na(result$blacklist_keywords))
 
   # Derive postal code and city from address field (e.g. "6658 Borgnone")
   addr <- result$address
@@ -189,9 +232,13 @@ init_db <- function(db_path) {
       heating        TEXT,
       floors         TEXT,
       floors_n       REAL,
-      noise_level    TEXT,
-      image_path     TEXT,
-      parsed_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+      noise_level         TEXT,
+      description         TEXT,
+      blacklist_keywords  TEXT,
+      interesting_keywords TEXT,
+      is_blacklisted      INTEGER DEFAULT 0,
+      image_path          TEXT,
+      parsed_at           DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
 
@@ -356,8 +403,9 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           living_area, living_area_m2, plot_area, plot_area_m2,
           built_area, built_area_m2, rooms, rooms_n,
           heating, floors, floors_n, noise_level,
+          description, blacklist_keywords, interesting_keywords, is_blacklisted,
           image_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         list(
           row$id, row$property_link,
           parsed$object_number, parsed$object_type, parsed$state,
@@ -369,6 +417,8 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           parsed$rooms,          parsed$rooms_n,
           parsed$heating, parsed$floors, parsed$floors_n,
           parsed$noise_level,
+          parsed$description,
+          parsed$blacklist_keywords, parsed$interesting_keywords, parsed$is_blacklisted,
           image_path
         )
       ),
