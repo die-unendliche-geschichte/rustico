@@ -70,6 +70,13 @@ centroid_df <- data.frame(postal_code = zip_cents$postal_code,
 # One row per property with display columns + coordinates for crosstalk
 map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
   dplyr::transmute(
+    Title = {
+      slug <- sub(".*[/]([^/?]+)(\\?.*)?$", "\\1", property_link)
+      slug <- sub("[-_][0-9]{5,}$", "", slug)
+      text <- trimws(gsub(" {2,}", " ", gsub("[-_]+", " ", slug)))
+      text <- gsub("((?:[^ ]+ ){4})", "\\1<br>", text, perl = TRUE)
+      paste0('<a href="', property_link, '" target="_blank"><small>', text, '</small></a>')
+    },
     Location        = paste0(postal_code, " ", city),
     Region          = region,
     Price           = round(price_chf / 1000),
@@ -92,7 +99,6 @@ map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
     Garten          = garden,
     Keywords        = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
     Blacklist       = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
-    Link            = paste0('<a href="', property_link, '" target="_blank">open</a>'),
     popup_html      = paste0(
       "<b>", paste0(postal_code, " ", city), "</b><br>",
       "CHF ", ifelse(!is.na(price_chf),
@@ -110,6 +116,14 @@ map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
 shared <- SharedData$new(map_data)
 ```
 
+```{css}
+table.dataTable tbody td {
+  max-height: 4.5em;
+  overflow: hidden;
+  vertical-align: top;
+}
+```
+
 ## Row {.tabset}
 
 ### Properties
@@ -124,9 +138,9 @@ datatable(
   filter    = "top",
   options   = list(
     pageLength = 25,
-    order      = list(list(2, "asc")),   # sort by price ascending
+    order      = list(list(3, "asc")),   # sort by price ascending
     columnDefs = list(
-      list(targets = 21,            visible = FALSE),  # Blacklist
+      list(targets = 22,            visible = FALSE),  # Blacklist
       list(targets = c(23, 24, 25), visible = FALSE)   # popup_html, lat, lng
     )
   )
