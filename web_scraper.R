@@ -117,6 +117,29 @@ extract_m2 <- function(x) {
   as.numeric(gsub(",", ".", m))
 }
 
+# Extract a 4-digit year (1900–2099)
+extract_year <- function(x) {
+  if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_integer_)
+  m <- regmatches(x, regexpr("(?:19|20)\\d{2}", x, perl = TRUE))
+  if (length(m) == 0) NA_integer_ else as.integer(m)
+}
+
+# Extract a distance in kilometres from strings like "12 km", "ca. 17km"
+extract_km <- function(x) {
+  if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
+  m <- regmatches(x, regexpr("[0-9]+(?:[.,][0-9]+)?(?=\\s*km)", x, perl = TRUE))
+  if (length(m) == 0) NA_real_ else as.numeric(gsub(",", ".", m))
+}
+
+# Extract distance in metres: converts km if found, otherwise parses bare metre value
+extract_metres <- function(x) {
+  if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
+  km <- extract_km(x)
+  if (!is.na(km)) return(km * 1000)
+  m <- regmatches(x, regexpr("[0-9]+(?:[.,][0-9]+)?(?=\\s*m(?:[^²2]|$))", x, perl = TRUE))
+  if (length(m) == 0) NA_real_ else as.numeric(gsub(",", ".", m))
+}
+
 # Parse all structured fields out of a property's raw text content.
 #
 # Each listing card has two parts:
@@ -129,6 +152,9 @@ extract_m2 <- function(x) {
 # detail-page fields (Objekt Nummer, Adresse, …).
 parse_property_text <- function(text) {
   text <- gsub("\u00a0", " ", text)   # non-breaking space → regular space
+
+  # Truncate at Italian section (detail pages are bilingual; keep German only)
+  text <- sub("(?si)\\s*Ubicazione.*$", "", text, perl = TRUE)
 
   # ── Split on newlines to separate the inline summary (line 1) ───────────────
   lines <- trimws(strsplit(text, "\n")[[1]])
@@ -181,21 +207,36 @@ parse_property_text <- function(text) {
     built_area     = "verbaute\\s*Fl\u00e4che",
     region         = "Region",
     condition      = "Zustand",
-    bathrooms      = "(?:Dusche|Badezimmer|Bad)/WC",
-    basement       = "Keller",
+    bathrooms      = "(?:Dusche(?:/Bad)?|Badezimmer|Bad)/WC|Dusche/Bad,?\\s*WC",
+    basement       = "Keller(?:abteil|fl\u00e4che)?",
     secondary_home = "Zweitwohnsitz",
     parking        = "Parkpl(?:\u00e4tze?|atz)",
     lage           = "Lage",
     ausblick       = "(?:Ausblick|Aussicht)",
     floors         = "(?:Etagen|Geschosszahl)",
-    heating        = "Heizung",
-    # ── Detail page fields (populated when scraping individual listings) ─────
-    object_number  = "Objekt\\s*Nummer",
-    object_type    = "Objekt\\s*Typ",
-    state          = "Bundesland",
-    address        = "Adresse",
-    rooms          = "Zimmer",
-    noise_level    = "L\u00e4rmbelastung"
+    heating        = "Heizung(?:\\s*/\\s*(?:Klimaanlage|Klima))?",
+    # ── Detail page fields ───────────────────────────────────────────────────
+    object_number      = "Objekt\\s*Nummer",
+    object_type        = "Objekt\\s*Typ",
+    state              = "Bundesland",
+    address            = "Adresse",
+    rooms              = "Zimmer",
+    noise_level        = "L\u00e4rmbelastung",
+    wc                 = "WC(?:\\s+separat)?",
+    baeder             = "B\u00e4der",
+    build_year         = "Baujahr",
+    renovation         = "Renovationen?",
+    shopping           = "Einkaufen",
+    schools            = "Schulen",
+    public_transport   = "\u00d6ffentliche\\s*Verkehrsmittel",
+    public_connections = "\u00d6ffentliche\\s*Anbindung|\u00d6ffentlicher\\s*Transport",
+    dist_highway       = "Distanz\\s+(?:zur?\\s+)?Autobahn",
+    dist_city          = "Distanz\\s+(?:zur?\\s+n\u00e4chsten?\\s+|n\u00e4chste\\s+)?Stadt",
+    wasser             = "Wasser(?:\\s*/\\s*Abwasser)?",
+    kanalisation       = "Kanalisation(?:ierung)?",
+    garden             = "Garten(?:fl\u00e4che|sitzplatz)?",
+    balcony            = "Balkon(?:fl\u00e4che|e)?",
+    terrace            = "Terrassen?(?:fl\u00e4che)?"
   )
 
   all_labels_pat <- paste(labels, collapse = "|")
@@ -210,8 +251,8 @@ parse_property_text <- function(text) {
     if (length(m) > 0 && nchar(m) > 0) {
       strip_pat <- paste0("^(?i)(?:", labels[[col_name]], ")\\s*:?\\s*")
       val <- trimws(sub(strip_pat, "", m, perl = TRUE))
-      # Strip "mehr... Details Merken" trailing artefacts
-      val <- trimws(sub("\\s*mehr\\.\\.\\..*$", "", val, perl = TRUE))
+      # Strip UI artefacts ("mehr...", "Merken" bookmark button)
+      val <- trimws(sub("\\s*(?:mehr\\.\\.\\..*|Merken.*)$", "", val, perl = TRUE))
       result[[col_name]] <- if (nzchar(val)) val else NA_character_
     }
   }
@@ -227,7 +268,10 @@ parse_property_text <- function(text) {
       regexec("^([0-9]{4})\\s+(.+)$", trimws(result$address)))[[1]]
     if (length(addr_m) >= 3) {
       postal_code <- addr_m[2]
-      city        <- addr_m[3]
+      # Strip run-on text: break at first lowercase→uppercase boundary (e.g. "CugnascoKaufpreis")
+      city <- trimws(sub("([a-z\u00e4\u00f6\u00fc\u00df])([A-Z\u00c4\u00d6\u00dc]).*$",
+                         "\\1", addr_m[3], perl = TRUE))
+      if (!nzchar(city)) city <- NA_character_
     }
   }
   result$postal_code <- postal_code
@@ -241,8 +285,17 @@ parse_property_text <- function(text) {
   result$living_area_m2 <- extract_m2(result$living_area)
   result$plot_area_m2   <- extract_m2(result$plot_area)
   result$built_area_m2  <- extract_m2(result$built_area)
-  result$rooms_n        <- suppressWarnings(as.numeric(trimws(result$rooms)))
-  result$floors_n       <- suppressWarnings(as.numeric(trimws(result$floors)))
+  result$rooms_n          <- suppressWarnings(as.numeric(trimws(result$rooms)))
+  result$floors_n         <- suppressWarnings(as.numeric(trimws(result$floors)))
+  result$wc_n             <- suppressWarnings(as.numeric(trimws(result$wc)))
+  result$bathrooms_n      <- if (!is.na(result$baeder))
+    suppressWarnings(as.numeric(trimws(result$baeder)))
+  else
+    suppressWarnings(as.numeric(trimws(result$bathrooms)))
+  result$build_year_n     <- extract_year(result$build_year)
+  result$public_transport_m <- extract_metres(result$public_transport)
+  result$dist_highway_km  <- extract_km(result$dist_highway)
+  result$dist_city_km     <- extract_km(result$dist_city)
 
   as.data.frame(result, stringsAsFactors = FALSE)
 }
@@ -260,19 +313,25 @@ init_db <- function(db_path) {
       position      INTEGER,
       property_link TEXT UNIQUE,
       image_url     TEXT,
-      raw_text      TEXT,
-      scraped_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_seen     DATETIME DEFAULT CURRENT_TIMESTAMP,
-      is_active     INTEGER  DEFAULT 1
+      raw_text          TEXT,
+      detail_text       TEXT,
+      scraped_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen         DATETIME DEFAULT CURRENT_TIMESTAMP,
+      detail_scraped_at DATETIME,
+      is_active         INTEGER  DEFAULT 1
     )
   ")
 
   # Migrate existing databases
   existing_raw_cols <- dbListFields(con, "raw_properties")
-  if (!"last_seen"  %in% existing_raw_cols)
+  if (!"last_seen"         %in% existing_raw_cols)
     dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN last_seen DATETIME DEFAULT CURRENT_TIMESTAMP")
-  if (!"is_active"  %in% existing_raw_cols)
+  if (!"is_active"         %in% existing_raw_cols)
     dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN is_active INTEGER DEFAULT 1")
+  if (!"detail_text"       %in% existing_raw_cols)
+    dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN detail_text TEXT")
+  if (!"detail_scraped_at" %in% existing_raw_cols)
+    dbExecute(con, "ALTER TABLE raw_properties ADD COLUMN detail_scraped_at DATETIME")
 
   # Structured data derived from raw_properties — can be dropped and rebuilt
   dbExecute(con, "
@@ -315,6 +374,27 @@ init_db <- function(db_path) {
       image_path           TEXT,
       lat                  REAL,
       lon                  REAL,
+      wc                   TEXT,
+      wc_n                 REAL,
+      baeder               TEXT,
+      bathrooms_n          REAL,
+      build_year           TEXT,
+      build_year_n         INTEGER,
+      renovation           TEXT,
+      shopping             TEXT,
+      schools              TEXT,
+      public_transport     TEXT,
+      public_transport_m   REAL,
+      public_connections   TEXT,
+      dist_highway         TEXT,
+      dist_highway_km      REAL,
+      dist_city            TEXT,
+      dist_city_km         REAL,
+      wasser               TEXT,
+      kanalisation         TEXT,
+      garden               TEXT,
+      balcony              TEXT,
+      terrace              TEXT,
       parsed_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
@@ -324,7 +404,16 @@ init_db <- function(db_path) {
   new_prop_cols <- list(
     region = "TEXT", condition = "TEXT", lage = "TEXT", ausblick = "TEXT",
     bathrooms = "TEXT", basement = "TEXT", secondary_home = "TEXT", parking = "TEXT",
-    lat = "REAL", lon = "REAL"
+    lat = "REAL", lon = "REAL",
+    wc = "TEXT", wc_n = "REAL", baeder = "TEXT", bathrooms_n = "REAL",
+    build_year = "TEXT", build_year_n = "INTEGER",
+    renovation = "TEXT", shopping = "TEXT", schools = "TEXT",
+    public_transport = "TEXT", public_transport_m = "REAL",
+    public_connections = "TEXT",
+    dist_highway = "TEXT", dist_highway_km = "REAL",
+    dist_city = "TEXT", dist_city_km = "REAL",
+    wasser = "TEXT", kanalisation = "TEXT",
+    garden = "TEXT", balcony = "TEXT", terrace = "TEXT"
   )
   for (col in names(new_prop_cols)) {
     if (!col %in% existing_prop_cols)
@@ -536,8 +625,14 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           heating, floors, floors_n, noise_level,
           region, condition, lage, ausblick,
           bathrooms, basement, secondary_home, parking,
+          wc, wc_n, baeder, bathrooms_n,
+          build_year, build_year_n, renovation,
+          shopping, schools,
+          public_transport, public_transport_m, public_connections,
+          dist_highway, dist_highway_km, dist_city, dist_city_km,
+          wasser, kanalisation, garden, balcony, terrace,
           description, image_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         list(
           row$id, row$property_link,
           parsed$object_number, parsed$object_type, parsed$state,
@@ -551,6 +646,12 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           parsed$noise_level,
           parsed$region, parsed$condition, parsed$lage, parsed$ausblick,
           parsed$bathrooms, parsed$basement, parsed$secondary_home, parsed$parking,
+          parsed$wc, parsed$wc_n, parsed$baeder, parsed$bathrooms_n,
+          parsed$build_year, parsed$build_year_n, parsed$renovation,
+          parsed$shopping, parsed$schools,
+          parsed$public_transport, parsed$public_transport_m, parsed$public_connections,
+          parsed$dist_highway, parsed$dist_highway_km, parsed$dist_city, parsed$dist_city_km,
+          parsed$wasser, parsed$kanalisation, parsed$garden, parsed$balcony, parsed$terrace,
           parsed$description, image_path
         )
       )
@@ -562,7 +663,168 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
   cat("Total properties parsed:", total, "\n")
 }
 
-# ── Step 3: Apply keywords ─────────────────────────────────────────────────────
+# ── Step 3: Scrape detail pages ────────────────────────────────────────────────
+
+# Fetch each property's individual listing page, store the full text in
+# raw_properties.detail_text, and update the properties row with any richer
+# data found there (full description, object number, address, rooms, etc.).
+# Resumable: rows with detail_scraped_at already set are skipped.
+scrape_detail_pages <- function(db_path = "rustico_properties.sqlite", delay = 1) {
+  con <- init_db(db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  todo <- dbGetQuery(con, "
+    SELECT p.id AS prop_id, r.id AS raw_id, r.property_link
+    FROM properties p
+    JOIN raw_properties r ON r.id = p.raw_id
+    WHERE r.property_link IS NOT NULL
+      AND r.detail_scraped_at IS NULL
+    ORDER BY r.page, r.position
+  ")
+
+  cat("=== SCRAPING DETAIL PAGES ===\n")
+  cat("Properties to scrape:", nrow(todo), "\n\n")
+
+  for (i in seq_len(nrow(todo))) {
+    row <- todo[i, ]
+    cat("[", i, "/", nrow(todo), "]", basename(row$property_link), "...")
+
+    page <- scrape_with_retry(row$property_link)
+    if (is.null(page)) { cat(" Failed\n"); next }
+
+    # Extract text: try common content containers, fall back to body
+    detail_text <- NULL
+    for (sel in c(".estate-item", ".estate-detail", ".property-detail",
+                  ".property-content", "main", "body")) {
+      el <- page %>% html_elements(sel)
+      if (length(el) > 0) {
+        detail_text <- el[[1]] %>% html_text(trim = TRUE)
+        break
+      }
+    }
+    if (is.null(detail_text) || !nzchar(detail_text)) { cat(" No content\n"); next }
+
+    # Extract German description from Beschreibung heading (detail pages only)
+    desc_parts <- strsplit(detail_text, "\\n{1,3}Beschreibung\\n{1,3}", perl = TRUE)[[1]]
+    detail_description <- if (length(desc_parts) >= 2) {
+      after <- desc_parts[[length(desc_parts)]]
+      after <- sub("(?s)\\n{1,3}(?:Highlights|Ubicazione|Media|Empfehlen|\u00c4hnliche).*$",
+                   "", after, perl = TRUE)
+      trimws(after)
+    } else NA_character_
+    if (is.na(detail_description) || !nzchar(detail_description))
+      detail_description <- NA_character_
+
+    # Store raw detail text and mark as scraped
+    dbExecute(con,
+      "UPDATE raw_properties
+       SET detail_text = ?, detail_scraped_at = CURRENT_TIMESTAMP
+       WHERE id = ?",
+      list(detail_text, row$raw_id)
+    )
+
+    # Isolate property data block — skip navigation and broker contact section
+    # (broker's "Adresse:" would otherwise shadow the property address)
+    parse_text <- detail_text
+    for (marker in c("Objekt Nummer:", "PLZ, ORT :")) {
+      pos <- regexpr(marker, detail_text, fixed = TRUE)
+      if (pos[1] > 0) { parse_text <- substr(detail_text, pos[1], nchar(detail_text)); break }
+    }
+
+    # Re-parse and update properties; prefer detail values, keep card values as fallback
+    parsed <- parse_property_text(parse_text)
+    dbExecute(con, "
+      UPDATE properties SET
+        object_number      = COALESCE(?, object_number),
+        object_type        = COALESCE(?, object_type),
+        state              = COALESCE(?, state),
+        address            = COALESCE(?, address),
+        postal_code        = COALESCE(?, postal_code),
+        city               = COALESCE(?, city),
+        purchase_price     = COALESCE(?, purchase_price),
+        price_chf          = COALESCE(?, price_chf),
+        living_area        = COALESCE(?, living_area),
+        living_area_m2     = COALESCE(?, living_area_m2),
+        plot_area          = COALESCE(?, plot_area),
+        plot_area_m2       = COALESCE(?, plot_area_m2),
+        rooms              = COALESCE(?, rooms),
+        rooms_n            = COALESCE(?, rooms_n),
+        floors             = COALESCE(?, floors),
+        floors_n           = COALESCE(?, floors_n),
+        heating            = COALESCE(?, heating),
+        noise_level        = COALESCE(?, noise_level),
+        region             = COALESCE(?, region),
+        condition          = COALESCE(?, condition),
+        lage               = COALESCE(?, lage),
+        ausblick           = COALESCE(?, ausblick),
+        bathrooms          = COALESCE(?, bathrooms),
+        basement           = COALESCE(?, basement),
+        secondary_home     = COALESCE(?, secondary_home),
+        parking            = COALESCE(?, parking),
+        wc                 = COALESCE(?, wc),
+        wc_n               = COALESCE(?, wc_n),
+        baeder             = COALESCE(?, baeder),
+        bathrooms_n        = COALESCE(?, bathrooms_n),
+        build_year         = COALESCE(?, build_year),
+        build_year_n       = COALESCE(?, build_year_n),
+        renovation         = COALESCE(?, renovation),
+        shopping           = COALESCE(?, shopping),
+        schools            = COALESCE(?, schools),
+        public_transport   = COALESCE(?, public_transport),
+        public_transport_m = COALESCE(?, public_transport_m),
+        public_connections = COALESCE(?, public_connections),
+        dist_highway       = COALESCE(?, dist_highway),
+        dist_highway_km    = COALESCE(?, dist_highway_km),
+        dist_city          = COALESCE(?, dist_city),
+        dist_city_km       = COALESCE(?, dist_city_km),
+        wasser             = COALESCE(?, wasser),
+        kanalisation       = COALESCE(?, kanalisation),
+        garden             = COALESCE(?, garden),
+        balcony            = COALESCE(?, balcony),
+        terrace            = COALESCE(?, terrace),
+        description        = ?
+      WHERE id = ?",
+      list(
+        parsed$object_number, parsed$object_type, parsed$state,
+        parsed$address, parsed$postal_code, parsed$city,
+        parsed$purchase_price, parsed$price_chf,
+        parsed$living_area,    parsed$living_area_m2,
+        parsed$plot_area,      parsed$plot_area_m2,
+        parsed$rooms,          parsed$rooms_n,
+        parsed$floors,         parsed$floors_n,
+        parsed$heating,        parsed$noise_level,
+        parsed$region,         parsed$condition,
+        parsed$lage,           parsed$ausblick,
+        parsed$bathrooms,      parsed$basement,
+        parsed$secondary_home, parsed$parking,
+        parsed$wc,             parsed$wc_n,
+        parsed$baeder,         parsed$bathrooms_n,
+        parsed$build_year,     parsed$build_year_n,
+        parsed$renovation,     parsed$shopping,
+        parsed$schools,
+        parsed$public_transport, parsed$public_transport_m,
+        parsed$public_connections,
+        parsed$dist_highway,   parsed$dist_highway_km,
+        parsed$dist_city,      parsed$dist_city_km,
+        parsed$wasser,         parsed$kanalisation,
+        parsed$garden,         parsed$balcony,
+        parsed$terrace,
+        detail_description,
+        row$prop_id
+      )
+    )
+
+    cat(" OK\n")
+    Sys.sleep(delay)
+  }
+
+  n_done <- dbGetQuery(con,
+    "SELECT COUNT(*) AS n FROM raw_properties WHERE detail_scraped_at IS NOT NULL")$n
+  cat("\n=== DETAIL SCRAPING COMPLETE ===\n")
+  cat("Total detail pages scraped:", n_done, "\n")
+}
+
+# ── Step 4: Apply keywords ─────────────────────────────────────────────────────
 
 # Update keyword flags on already-parsed properties. Run this any time the
 # keyword lists change — no re-scraping or re-parsing needed.
@@ -825,6 +1087,7 @@ if (sys.nframe() == 0) {
   scrape_raw(max_pages = 233, items_per_page = 10)
   update_active_status()
   parse_and_enrich()
+  scrape_detail_pages()
   apply_keywords()
   geolocate()
   export_to_csv()
