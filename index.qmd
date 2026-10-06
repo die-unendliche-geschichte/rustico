@@ -189,7 +189,7 @@ leaflet(shared) |>
     color       = "#555",
     weight      = 1,
     fillColor   = "#aaa",
-    fillOpacity = 0.15,
+    fillOpacity = 0.4,
     label       = ~postal_code
   ) |>
   addCircleMarkers(
