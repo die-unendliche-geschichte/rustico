@@ -1,6 +1,16 @@
 ---
 title: "Rustico Suche"
-format: dashboard
+format:
+  dashboard:
+    include-in-header:
+      text: |
+        <style>
+        table.dataTable tbody td {
+          height: 3em;
+          overflow: hidden;
+          vertical-align: top;
+        }
+        </style>
 execute:
   echo: false
   warning: false
@@ -115,14 +125,6 @@ map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
   )
 
 shared <- SharedData$new(map_data)
-
-htmltools::tags$style("
-  table.dataTable tbody td {
-    height: 3em;
-    overflow: hidden;
-    vertical-align: top;
-  }
-")
 ```
 
 ## Row {.tabset}
