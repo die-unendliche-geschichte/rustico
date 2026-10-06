@@ -35,9 +35,17 @@
       flex-direction: column;
       width: 58%;
       min-width: 380px;
-      border-right: 1px solid #d0d0d0;
     }
     #grid { flex: 1; }
+
+    #divider {
+      width: 5px;
+      cursor: col-resize;
+      background: #d0d0d0;
+      flex-shrink: 0;
+      transition: background .15s;
+    }
+    #divider:hover, #divider.dragging { background: #888; }
 
     #map-pane { flex: 1; min-width: 0; }
     #map { height: 100%; }
@@ -54,6 +62,7 @@
   <div id="table-pane">
     <div id="grid" class="ag-theme-alpine"></div>
   </div>
+  <div id="divider"></div>
   <div id="map-pane">
     <div id="map"></div>
   </div>
@@ -78,6 +87,39 @@ function titleFromLink(link) {
 function fmtCHF(v) {
   return v != null ? 'CHF\u202f' + Math.round(v / 1000) + 'k' : '';
 }
+
+// ── Resizable divider ─────────────────────────────────────────────────────────
+
+(function () {
+  const divider  = document.getElementById('divider');
+  const tablePane = document.getElementById('table-pane');
+  let dragging = false, startX = 0, startW = 0;
+
+  divider.addEventListener('mousedown', e => {
+    dragging = true;
+    startX = e.clientX;
+    startW = tablePane.getBoundingClientRect().width;
+    divider.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const newW = Math.max(200, startW + e.clientX - startX);
+    tablePane.style.width = newW + 'px';
+    tablePane.style.flex  = 'none';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    divider.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    map.invalidateSize();
+  });
+})();
 
 // ── Map ───────────────────────────────────────────────────────────────────────
 
@@ -143,49 +185,42 @@ function syncMapToIds(visibleIds) {
 
 // ── Grid ─────────────────────────────────────────────────────────────────────
 
+const TITLE_MAX = 60;
+
 const colDefs = [
   {
     headerName: 'Inserat',
     valueGetter:  p => titleFromLink(p.data.property_link),
-    cellRenderer: p =>
-      `<a href="${p.data.property_link}" target="_blank"
-          style="font-size:.82em;line-height:1.4;display:block;
-                 overflow:hidden;max-height:3.2em">${p.value}</a>`,
+    cellRenderer: p => {
+      const t = p.value.length > TITLE_MAX ? p.value.slice(0, TITLE_MAX) + '…' : p.value;
+      return `<a href="${p.data.property_link}" target="_blank"
+          style="font-size:.82em;line-height:1.4;">${t}</a>`;
+    },
     filter: 'agTextColumnFilter',
-    width: 210,
+    flex: 1,
+    minWidth: 160,
   },
-  { field: 'postal_code', headerName: 'PLZ',       width: 68,  filter: 'agTextColumnFilter'   },
-  { field: 'city',        headerName: 'Ort',       width: 130, filter: 'agTextColumnFilter'   },
-  { field: 'region',      headerName: 'Region',    width: 110, filter: 'agTextColumnFilter'   },
   {
-    field: 'price_chf', headerName: 'Preis', width: 100, filter: 'agNumberColumnFilter',
+    field: 'price_chf', headerName: 'Preis', width: 95, filter: 'agNumberColumnFilter',
     valueFormatter: p => fmtCHF(p.value),
     sort: 'asc',
   },
-  { field: 'living_area_m2', headerName: 'Wohn m²',   width: 88, filter: 'agNumberColumnFilter' },
-  { field: 'plot_area_m2',   headerName: 'Grund m²',  width: 88, filter: 'agNumberColumnFilter' },
-  { field: 'rooms_n',        headerName: 'Zimmer',    width: 78, filter: 'agNumberColumnFilter' },
-  { field: 'wc_n',           headerName: 'WC',        width: 62, filter: 'agNumberColumnFilter' },
-  { field: 'bathrooms_n',    headerName: 'Bäder',     width: 75, filter: 'agNumberColumnFilter' },
-  { field: 'floors_n',       headerName: 'Etagen',    width: 78, filter: 'agNumberColumnFilter' },
-  { field: 'build_year_n',   headerName: 'Baujahr',   width: 88, filter: 'agNumberColumnFilter' },
-  { field: 'condition',      headerName: 'Zustand',   width: 130, filter: 'agTextColumnFilter'  },
-  { field: 'secondary_home', headerName: 'Zweitwohn.',width: 108, filter: 'agTextColumnFilter'  },
-  { field: 'parking',        headerName: 'Parking',   width: 100, filter: 'agTextColumnFilter'  },
-  { field: 'lage',           headerName: 'Lage',      width: 200, filter: 'agTextColumnFilter'  },
-  { field: 'ausblick',       headerName: 'Ausblick',  width: 150, filter: 'agTextColumnFilter'  },
-  { field: 'public_transport_m', headerName: 'ÖV m',      width: 78, filter: 'agNumberColumnFilter' },
-  { field: 'dist_highway_km',    headerName: 'Autob. km', width: 95, filter: 'agNumberColumnFilter' },
-  { field: 'dist_city_km',       headerName: 'Stadt km',  width: 88, filter: 'agNumberColumnFilter' },
-  { field: 'schools',        headerName: 'Schulen',   width: 100, filter: 'agTextColumnFilter'  },
-  { field: 'garden',         headerName: 'Garten',    width: 100, filter: 'agTextColumnFilter'  },
-  { field: 'interesting_keywords', headerName: 'Keywords', width: 150, filter: 'agTextColumnFilter' },
+  {
+    headerName: 'Ort',
+    valueGetter: p => [p.data.postal_code, p.data.city].filter(Boolean).join(' '),
+    filter: 'agTextColumnFilter',
+    width: 160,
+  },
+  { field: 'living_area_m2', headerName: 'Wohn m²',  width: 88,  filter: 'agNumberColumnFilter' },
+  { field: 'plot_area_m2',   headerName: 'Grund m²', width: 88,  filter: 'agNumberColumnFilter' },
+  { field: 'gemeinde',       headerName: 'Gemeinde', width: 130, filter: 'agTextColumnFilter'   },
+  { field: 'bezirk',         headerName: 'Bezirk',   width: 130, filter: 'agTextColumnFilter'   },
 ];
 
 const countEl = document.getElementById('count');
 
 agGrid.createGrid(document.getElementById('grid'), {
-  columnDefs,
+  columnDefs: colDefs,
   rowData: PROPERTIES,
   defaultColDef: {
     sortable:       true,

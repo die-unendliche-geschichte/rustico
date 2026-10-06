@@ -276,6 +276,25 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 
 ---
 
+## Known data gaps
+
+### PLZ codes not matched to Gemeinde/Bezirk
+
+The following postal codes are present in the scraped data but missing from
+`AMTOVZ_GDB_LV95.gdb` (the Swiss official ZIP polygon dataset), so no
+Gemeinde/Bezirk can be assigned to listings with these PLZ:
+
+| PLZ  | Notes |
+|------|-------|
+| 6663 | |
+| 6664 | |
+| 6911 | Campione d'Italia (Italian exclave within CH) |
+
+To investigate: check whether these PLZ have been reassigned, merged, or are
+otherwise present under a different code in a newer AMTOVZ edition.
+
+---
+
 ## File structure
 
 ```

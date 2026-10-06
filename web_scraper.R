@@ -165,7 +165,7 @@ parse_property_text <- function(text) {
   postal_code <- NA_character_
   city        <- NA_character_
   header <- sub("(?i)(?:Kaufpreis|Wohnfl\u00e4che|Nutzfl\u00e4che).*$", "", first_line, perl = TRUE)
-  plz_m  <- regmatches(header, regexec("PLZ, ORT : ([0-9]{4}) (.+)$", trimws(header)))[[1]]
+  plz_m  <- regmatches(header, regexec("PLZ, ORT\u00a0?:\u00a0?([0-9]{4})[\u00a0 ](.+)$", trimws(header)))[[1]]
   if (length(plz_m) >= 3) {
     postal_code <- trimws(plz_m[2])
     city        <- trimws(plz_m[3])
@@ -718,7 +718,7 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
     # The card's "PLZ, ORT : XXXX City" is reliable; ortschaft can accidentally
     # capture the broker's city (different Swiss region, different first digit).
     card_m <- regmatches(row$raw_text,
-                         regexec("PLZ, ORT : ([0-9]{4})", row$raw_text))[[1]]
+                         regexec("PLZ, ORT\u00a0?:\u00a0?([0-9]{4})", row$raw_text))[[1]]
     card_plz <- if (length(card_m) >= 2) card_m[2] else NA_character_
     if (!is.na(parsed$postal_code) && !is.na(card_plz) &&
         substr(parsed$postal_code, 1, 1) != substr(card_plz, 1, 1)) {
