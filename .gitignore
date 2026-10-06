@@ -1,0 +1,12 @@
+# Generated outputs
+rustico_properties.sqlite
+rustico_properties.csv
+images/
+
+# R
+.Rhistory
+.Rproj.user/
+.Rdata
+
+# Logs
+*.log
