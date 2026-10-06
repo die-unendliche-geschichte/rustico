@@ -8,15 +8,6 @@ execute:
 ---
 
 ```{r setup}
-# Load .Renviron anchored to the document's own directory, so quarto preview
-# picks it up regardless of the terminal's working directory
-local({
-  doc_dir <- dirname(normalizePath(knitr::current_input(), mustWork = FALSE))
-  f <- file.path(doc_dir, ".Renviron")
-  if (file.exists(f)) {
-    readRenviron(f)
-  }
-})
 library(DBI)
 library(RSQLite)
 library(dplyr)
@@ -191,5 +182,5 @@ tm_shape(zip_data) +
     id          = "postal_code",
     popup.vars  = c("City" = "city", "Listings" = "n", "Prices" = "prices")
   ) +
-  tm_basemap("CartoDB.Positron", api = Sys.getenv("CARTO_TOKEN"))
+  tm_basemap("OpenStreetMap")
 ```
