@@ -113,8 +113,6 @@ parse_property_text <- function(text) {
   result <- setNames(rep(list(NA_character_), length(labels)), names(labels))
 
   for (col_name in names(labels)) {
-    # Match: label + optional colon + optional space + value (non-greedy)
-    # Stop at the next label or end of string
     pat <- paste0(
       "(?i)(?:", labels[[col_name]], ")\\s*:?\\s*(.*?)(?=\\s*(?:",
       all_labels_pat, ")|$)"
@@ -126,7 +124,7 @@ parse_property_text <- function(text) {
     }
   }
 
-  # Derive postal code and city from the address field (e.g. "6658 Borgnone")
+  # Derive postal code and city from address field (e.g. "6658 Borgnone")
   addr <- result$address
   if (!is.na(addr)) {
     addr_m <- regmatches(addr, regexec("^([0-9]{4})\\s+(.+)$", trimws(addr)))[[1]]
@@ -153,11 +151,25 @@ parse_property_text <- function(text) {
 init_db <- function(db_path) {
   con <- dbConnect(SQLite(), db_path)
 
+  # Raw scraped data — append-only, never mutated after insert
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS raw_properties (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      page          INTEGER,
+      position      INTEGER,
+      property_link TEXT UNIQUE,
+      image_url     TEXT,
+      raw_text      TEXT,
+      scraped_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  ")
+
+  # Structured data derived from raw_properties — can be dropped and rebuilt
   dbExecute(con, "
     CREATE TABLE IF NOT EXISTS properties (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,
-      page           INTEGER,
-      position       INTEGER,
+      raw_id         INTEGER REFERENCES raw_properties(id),
+      property_link  TEXT UNIQUE,
       object_number  TEXT,
       object_type    TEXT,
       state          TEXT,
@@ -178,10 +190,8 @@ init_db <- function(db_path) {
       floors         TEXT,
       floors_n       REAL,
       noise_level    TEXT,
-      property_link  TEXT UNIQUE,
       image_path     TEXT,
-      full_text      TEXT,
-      scraped_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+      parsed_at      DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
 
@@ -193,31 +203,16 @@ init_db <- function(db_path) {
     )
   ")
 
-  # Migrate existing databases: add any columns introduced since first creation
-  existing_cols <- dbListFields(con, "properties")
-  new_cols <- list(
-    object_number  = "TEXT", object_type    = "TEXT", state          = "TEXT",
-    address        = "TEXT", postal_code    = "TEXT", city           = "TEXT",
-    purchase_price = "TEXT", price_chf      = "REAL",
-    living_area    = "TEXT", living_area_m2 = "REAL",
-    plot_area      = "TEXT", plot_area_m2   = "REAL",
-    built_area     = "TEXT", built_area_m2  = "REAL",
-    rooms          = "TEXT", rooms_n        = "REAL",
-    heating        = "TEXT", floors         = "TEXT", floors_n = "REAL",
-    noise_level    = "TEXT"
-  )
-  for (col in names(new_cols)) {
-    if (!col %in% existing_cols)
-      dbExecute(con, sprintf("ALTER TABLE properties ADD COLUMN %s %s", col, new_cols[[col]]))
-  }
-
   con
 }
 
-# ── Main scraper ───────────────────────────────────────────────────────────────
+# ── Step 1: Scrape ─────────────────────────────────────────────────────────────
 
-scrape_all_properties <- function(max_pages = 233, items_per_page = 2,
-                                  db_path = "rustico_properties.sqlite") {
+# Hit the listing pages and store raw text + resolved URLs in raw_properties.
+# Resumable: pages already recorded in scraped_pages are skipped.
+# No parsing happens here — this step only touches the website.
+scrape_raw <- function(max_pages = 233, items_per_page = 2,
+                       db_path = "rustico_properties.sqlite") {
   base_url <- paste0(
     "https://immobiliensuche.edireal.com/tiimmobili.ch/search",
     "?sorting=MODIFICATION_DATE&estates-view=list-view&offerType=SELL",
@@ -230,9 +225,8 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2,
 
   done_pages <- dbGetQuery(con, "SELECT page_idx FROM scraped_pages")$page_idx
 
-  cat("=== SCRAPING ALL PROPERTIES ===\n")
-  cat("Max pages to scrape:", max_pages, "\n")
-  cat("Items per page:", items_per_page, "\n")
+  cat("=== SCRAPING RAW DATA ===\n")
+  cat("Max pages:", max_pages, "| Items per page:", items_per_page, "\n")
   cat("Already scraped:", length(done_pages), "pages\n\n")
 
   for (page_idx in 0:(max_pages - 1)) {
@@ -257,90 +251,44 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2,
       cat(" Found", length(estate_items), "properties\n")
 
       for (i in seq_along(estate_items)) {
-        property     <- estate_items[i]
-        text_content <- property %>% html_text(trim = TRUE)
-        parsed       <- parse_property_text(text_content)
+        property <- estate_items[i]
+        raw_text <- property %>% html_text(trim = TRUE)
 
-        # Property link
+        # Resolve property link to absolute URL
         link_nodes    <- property %>% html_elements("a")
         property_link <- NA_character_
         if (length(link_nodes) > 0) {
           rel <- link_nodes[1] %>% html_attr("href")
           if (!is.na(rel)) {
-            property_link <- if (startsWith(rel, "http")) {
-              rel
-            } else if (startsWith(rel, "/")) {
-              paste0("https://immobiliensuche.edireal.com", rel)
-            } else {
-              paste0("https://immobiliensuche.edireal.com/tiimmobili.ch/", rel)
-            }
+            property_link <- if (startsWith(rel, "http")) rel
+            else if (startsWith(rel, "/")) paste0("https://immobiliensuche.edireal.com", rel)
+            else paste0("https://immobiliensuche.edireal.com/tiimmobili.ch/", rel)
           }
         }
 
-        # Image
+        # Resolve image URL to absolute URL (download happens in step 2)
         image_nodes <- property %>% html_elements("img")
-        image_path  <- NA_character_
+        image_url   <- NA_character_
         if (length(image_nodes) > 0) {
-          image_src <- image_nodes[1] %>% html_attr("src")
-          if (!is.na(image_src)) {
-            image_url <- if (startsWith(image_src, "//")) {
-              paste0("https:", image_src)
-            } else if (startsWith(image_src, "/")) {
-              paste0("https://immobiliensuche.edireal.com", image_src)
-            } else if (!startsWith(image_src, "http")) {
-              paste0("https://immobiliensuche.edireal.com/", image_src)
-            } else {
-              image_src
-            }
-
-            clean_url      <- sub("\\?.*$", "", image_url)
-            file_extension <- tools::file_ext(basename(clean_url))
-            if (!nzchar(file_extension)) file_extension <- "jpg"
-            filename <- paste0("property_", page_idx + 1, "_", i, ".", file_extension)
-
-            cat("  Downloading image for property", i, "...")
-            downloaded_path <- download_image(image_url, filename)
-            if (!is.na(downloaded_path)) {
-              image_path <- downloaded_path
-              cat(" OK\n")
-            } else {
-              cat(" Failed\n")
-            }
+          src <- image_nodes[1] %>% html_attr("src")
+          if (!is.na(src)) {
+            image_url <- if (startsWith(src, "//")) paste0("https:", src)
+            else if (startsWith(src, "/")) paste0("https://immobiliensuche.edireal.com", src)
+            else if (!startsWith(src, "http")) paste0("https://immobiliensuche.edireal.com/", src)
+            else src
           }
         }
 
-        # Write row immediately; IGNORE silently skips duplicate property_link
         tryCatch(
           dbExecute(con,
-            "INSERT OR IGNORE INTO properties
-             (page, position,
-              object_number, object_type, state, address, postal_code, city,
-              purchase_price, price_chf,
-              living_area, living_area_m2, plot_area, plot_area_m2,
-              built_area, built_area_m2, rooms, rooms_n,
-              heating, floors, floors_n, noise_level,
-              property_link, image_path, full_text)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            list(
-              page_idx + 1, i,
-              parsed$object_number, parsed$object_type, parsed$state,
-              parsed$address, parsed$postal_code, parsed$city,
-              parsed$purchase_price, parsed$price_chf,
-              parsed$living_area,    parsed$living_area_m2,
-              parsed$plot_area,      parsed$plot_area_m2,
-              parsed$built_area,     parsed$built_area_m2,
-              parsed$rooms,          parsed$rooms_n,
-              parsed$heating, parsed$floors, parsed$floors_n,
-              parsed$noise_level,
-              property_link, image_path,
-              substr(text_content, 1, 500)
-            )
+            "INSERT OR IGNORE INTO raw_properties (page, position, property_link, image_url, raw_text)
+             VALUES (?, ?, ?, ?, ?)",
+            list(page_idx + 1, i, property_link, image_url, raw_text)
           ),
           error = function(e) cat("  DB write error:", e$message, "\n")
         )
       }
 
-      # Mark this page done so it is skipped on resume
       dbExecute(con,
         "INSERT OR REPLACE INTO scraped_pages (page_idx, items_found) VALUES (?, ?)",
         list(page_idx, length(estate_items))
@@ -352,9 +300,85 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2,
     Sys.sleep(2)
   }
 
-  total <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties")$n
+  total <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM raw_properties")$n
   cat("\n=== SCRAPING COMPLETE ===\n")
-  cat("Total properties in database:", total, "\n")
+  cat("Total raw properties stored:", total, "\n")
+}
+
+# ── Step 2: Parse and enrich ───────────────────────────────────────────────────
+
+# Parse structured fields from raw_text and download images for all rows in
+# raw_properties that do not yet have a corresponding entry in properties.
+# Safe to re-run: already-parsed rows are skipped.
+# To re-parse everything: dbExecute(con, "DELETE FROM properties"), then re-run.
+parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
+  con <- init_db(db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  unparsed <- dbGetQuery(con, "
+    SELECT r.id, r.page, r.position, r.property_link, r.image_url, r.raw_text
+    FROM raw_properties r
+    WHERE r.id NOT IN (SELECT raw_id FROM properties WHERE raw_id IS NOT NULL)
+    ORDER BY r.page, r.position
+  ")
+
+  cat("=== PARSING PROPERTIES ===\n")
+  cat("Rows to parse:", nrow(unparsed), "\n\n")
+
+  for (row_idx in seq_len(nrow(unparsed))) {
+    row    <- unparsed[row_idx, ]
+    parsed <- parse_property_text(row$raw_text)
+
+    # Download image
+    image_path <- NA_character_
+    if (!is.na(row$image_url)) {
+      clean_url      <- sub("\\?.*$", "", row$image_url)
+      file_extension <- tools::file_ext(basename(clean_url))
+      if (!nzchar(file_extension)) file_extension <- "jpg"
+      filename <- paste0("property_", row$page, "_", row$position, ".", file_extension)
+
+      cat("[", row_idx, "/", nrow(unparsed), "] Downloading image...")
+      downloaded_path <- download_image(row$image_url, filename)
+      if (!is.na(downloaded_path)) {
+        image_path <- downloaded_path
+        cat(" OK\n")
+      } else {
+        cat(" Failed\n")
+      }
+    }
+
+    tryCatch(
+      dbExecute(con,
+        "INSERT OR IGNORE INTO properties
+         (raw_id, property_link,
+          object_number, object_type, state, address, postal_code, city,
+          purchase_price, price_chf,
+          living_area, living_area_m2, plot_area, plot_area_m2,
+          built_area, built_area_m2, rooms, rooms_n,
+          heating, floors, floors_n, noise_level,
+          image_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        list(
+          row$id, row$property_link,
+          parsed$object_number, parsed$object_type, parsed$state,
+          parsed$address, parsed$postal_code, parsed$city,
+          parsed$purchase_price, parsed$price_chf,
+          parsed$living_area,    parsed$living_area_m2,
+          parsed$plot_area,      parsed$plot_area_m2,
+          parsed$built_area,     parsed$built_area_m2,
+          parsed$rooms,          parsed$rooms_n,
+          parsed$heating, parsed$floors, parsed$floors_n,
+          parsed$noise_level,
+          image_path
+        )
+      ),
+      error = function(e) cat("  DB write error:", e$message, "\n")
+    )
+  }
+
+  total <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties")$n
+  cat("\n=== PARSING COMPLETE ===\n")
+  cat("Total properties parsed:", total, "\n")
 }
 
 # ── Diagnostic helpers ─────────────────────────────────────────────────────────
@@ -464,6 +488,7 @@ export_to_csv <- function(db_path = "rustico_properties.sqlite",
 
 # Only run when executed directly (Rscript web_scraper.R), not when sourced
 if (sys.nframe() == 0) {
-  scrape_all_properties(max_pages = 233, items_per_page = 2)
+  scrape_raw(max_pages = 233, items_per_page = 2)
+  parse_and_enrich()
   export_to_csv()
 }
