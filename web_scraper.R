@@ -1130,6 +1130,54 @@ export_to_csv <- function(db_path = "rustico_properties.sqlite",
   cat("Exported", nrow(properties), "properties to", filename, "\n")
 }
 
+# Export active properties and PLZ polygons as JS variable files for index-2.html.
+# Writes data/properties.js and data/plz.js; both load via <script src> without
+# needing a local server (no fetch/CORS issues with file://).
+export_for_web <- function(db_path  = "rustico_properties.sqlite",
+                           gdb_path = "data/AMTOVZ_GDB_LV95.gdb",
+                           out_dir  = "data") {
+  if (!requireNamespace("jsonlite", quietly = TRUE))
+    stop("install.packages('jsonlite')")
+
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  props <- dbGetQuery(con, "
+    SELECT p.id, p.postal_code, p.city, p.region,
+           p.price_chf, p.living_area_m2, p.plot_area_m2,
+           p.rooms_n, p.wc_n, p.bathrooms_n, p.floors_n,
+           p.build_year_n, p.condition, p.secondary_home, p.parking,
+           p.lage, p.ausblick,
+           p.public_transport_m, p.dist_highway_km, p.dist_city_km,
+           p.schools, p.garden,
+           p.interesting_keywords, p.blacklist_keywords,
+           p.lat, p.lon,
+           r.property_link
+    FROM properties p
+    JOIN raw_properties r ON r.id = p.raw_id
+    WHERE r.is_active = 1
+    ORDER BY p.price_chf ASC NULLS LAST
+  ")
+
+  json <- jsonlite::toJSON(props, auto_unbox = TRUE, na = "null", digits = 6)
+  writeLines(paste0("const PROPERTIES = ", json, ";"),
+             file.path(out_dir, "properties.js"))
+  cat("Wrote", nrow(props), "properties to", file.path(out_dir, "properties.js"), "\n")
+
+  plzs     <- unique(props$postal_code[!is.na(props$postal_code)])
+  zip_all  <- sf::st_read(gdb_path, layer = "AMTOVZ_ZIP", quiet = TRUE)
+  zip_poly <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ] |>
+    dplyr::mutate(postal_code = as.character(ZIP4)) |>
+    dplyr::group_by(postal_code) |>
+    dplyr::summarise(.groups = "drop") |>
+    sf::st_transform(4326)
+  tmp <- tempfile(fileext = ".geojson")
+  sf::st_write(zip_poly, tmp, delete_dsn = TRUE, quiet = TRUE)
+  writeLines(paste0("const PLZ_GEOJSON = ", paste(readLines(tmp, warn = FALSE), collapse = "\n"), ";"),
+             file.path(out_dir, "plz.js"))
+  cat("Wrote", nrow(zip_poly), "PLZ polygons to", file.path(out_dir, "plz.js"), "\n")
+}
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 # Only run when executed directly (Rscript web_scraper.R), not when sourced
@@ -1141,4 +1189,5 @@ if (sys.nframe() == 0) {
   apply_keywords()
   geolocate()
   export_to_csv()
+  export_for_web()
 }

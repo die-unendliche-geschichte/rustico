@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rustico Suche</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/styles/ag-grid.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/styles/ag-theme-alpine.css">
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+
+    #header {
+      height: 40px;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      gap: 16px;
+      background: #1a2635;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    #header h1 { font-size: .95em; font-weight: 600; letter-spacing: .03em; }
+    #count { margin-left: auto; font-size: .8em; color: #99aabc; }
+
+    #app { display: flex; height: calc(100vh - 40px); }
+
+    #table-pane {
+      display: flex;
+      flex-direction: column;
+      width: 58%;
+      min-width: 380px;
+      border-right: 1px solid #d0d0d0;
+    }
+    #grid { flex: 1; }
+
+    #map-pane { flex: 1; min-width: 0; }
+    #map { height: 100%; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Rustico Suche</h1>
+  <span id="count"></span>
+</div>
+
+<div id="app">
+  <div id="table-pane">
+    <div id="grid" class="ag-theme-alpine"></div>
+  </div>
+  <div id="map-pane">
+    <div id="map"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.3.4/dist/ag-grid-community.min.noStyle.js"></script>
+<script src="data/plz.js"></script>
+<script src="data/properties.js"></script>
+
+<script>
+'use strict';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function titleFromLink(link) {
+  const slug = (link ?? '').split('/').pop().split('?')[0];
+  return slug.replace(/[-_]\d{5,}$/, '').replace(/[-_]+/g, ' ').trim();
+}
+
+function fmtCHF(v) {
+  return v != null ? 'CHF\u202f' + Math.round(v / 1000) + 'k' : '';
+}
+
+// ── Map ───────────────────────────────────────────────────────────────────────
+
+const swAttr = '© <a href="https://www.swisstopo.admin.ch">swisstopo</a>';
+const swUrl  = (layer, ext = 'jpeg') =>
+  `https://wmts.geo.admin.ch/1.0.0/${layer}/default/current/3857/{z}/{x}/{y}.${ext}`;
+
+const map = L.map('map').setView([46.25, 8.85], 9);
+
+const baseLayers = {
+  'Swisstopo Grey':   L.tileLayer(swUrl('ch.swisstopo.pixelkarte-grau'),  { attribution: swAttr }),
+  'Swisstopo Colour': L.tileLayer(swUrl('ch.swisstopo.pixelkarte-farbe'), { attribution: swAttr }),
+  'Aerial':           L.tileLayer(swUrl('ch.swisstopo.swissimage'),        { attribution: swAttr }),
+  'OpenStreetMap':    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        { attribution: '© <a href="https://osm.org/copyright">OpenStreetMap</a>' }),
+};
+baseLayers['Swisstopo Grey'].addTo(map);
+
+const plzLayer = L.geoJSON(PLZ_GEOJSON, {
+  style: { color: '#555', weight: 1, fillColor: '#aaa', fillOpacity: 0.4 },
+  onEachFeature(feature, layer) {
+    layer.bindTooltip(feature.properties.postal_code);
+    layer.on('mouseover', () => layer.setStyle({ weight: 3, color: '#000', fillOpacity: 0.6 }));
+    layer.on('mouseout',  () => plzLayer.resetStyle(layer));
+  },
+});
+
+L.control.layers(baseLayers, { PLZ: plzLayer }, { collapsed: false }).addTo(map);
+
+const cluster    = L.markerClusterGroup({ maxClusterRadius: 40 });
+const markerById = new Map();
+
+PROPERTIES.forEach(p => {
+  if (p.lat == null || p.lon == null) return;
+
+  const details = [
+    p.price_chf      != null ? fmtCHF(p.price_chf)               : null,
+    p.rooms_n        != null ? p.rooms_n + ' Zimmer'              : null,
+    p.living_area_m2 != null ? p.living_area_m2 + '\u202fm\u00b2' : null,
+    p.condition      != null ? p.condition                        : null,
+  ].filter(Boolean).join(' · ');
+
+  const popup = `<b>${p.postal_code ?? ''} ${p.city ?? ''}</b><br>
+${details}<br>
+<a href="${p.property_link}" target="_blank">Inserat öffnen →</a>`;
+
+  const m = L.circleMarker([p.lat, p.lon], {
+    radius: 9, color: '#333', weight: 2, fillColor: '#e05c1a', fillOpacity: 0.9,
+  }).bindPopup(popup);
+
+  markerById.set(p.id, m);
+  cluster.addLayer(m);
+});
+
+map.addLayer(cluster);
+
+function syncMapToIds(visibleIds) {
+  cluster.clearLayers();
+  for (const [id, m] of markerById) {
+    if (visibleIds.has(id)) cluster.addLayer(m);
+  }
+}
+
+// ── Grid ─────────────────────────────────────────────────────────────────────
+
+const colDefs = [
+  {
+    headerName: 'Inserat',
+    valueGetter:  p => titleFromLink(p.data.property_link),
+    cellRenderer: p =>
+      `<a href="${p.data.property_link}" target="_blank"
+          style="font-size:.82em;line-height:1.4;display:block;
+                 overflow:hidden;max-height:3.2em">${p.value}</a>`,
+    filter: 'agTextColumnFilter',
+    width: 210,
+  },
+  { field: 'postal_code', headerName: 'PLZ',       width: 68,  filter: 'agTextColumnFilter'   },
+  { field: 'city',        headerName: 'Ort',       width: 130, filter: 'agTextColumnFilter'   },
+  { field: 'region',      headerName: 'Region',    width: 110, filter: 'agTextColumnFilter'   },
+  {
+    field: 'price_chf', headerName: 'Preis', width: 100, filter: 'agNumberColumnFilter',
+    valueFormatter: p => fmtCHF(p.value),
+    sort: 'asc',
+  },
+  { field: 'living_area_m2', headerName: 'Wohn m²',   width: 88, filter: 'agNumberColumnFilter' },
+  { field: 'plot_area_m2',   headerName: 'Grund m²',  width: 88, filter: 'agNumberColumnFilter' },
+  { field: 'rooms_n',        headerName: 'Zimmer',    width: 78, filter: 'agNumberColumnFilter' },
+  { field: 'wc_n',           headerName: 'WC',        width: 62, filter: 'agNumberColumnFilter' },
+  { field: 'bathrooms_n',    headerName: 'Bäder',     width: 75, filter: 'agNumberColumnFilter' },
+  { field: 'floors_n',       headerName: 'Etagen',    width: 78, filter: 'agNumberColumnFilter' },
+  { field: 'build_year_n',   headerName: 'Baujahr',   width: 88, filter: 'agNumberColumnFilter' },
+  { field: 'condition',      headerName: 'Zustand',   width: 130, filter: 'agTextColumnFilter'  },
+  { field: 'secondary_home', headerName: 'Zweitwohn.',width: 108, filter: 'agTextColumnFilter'  },
+  { field: 'parking',        headerName: 'Parking',   width: 100, filter: 'agTextColumnFilter'  },
+  { field: 'lage',           headerName: 'Lage',      width: 200, filter: 'agTextColumnFilter'  },
+  { field: 'ausblick',       headerName: 'Ausblick',  width: 150, filter: 'agTextColumnFilter'  },
+  { field: 'public_transport_m', headerName: 'ÖV m',      width: 78, filter: 'agNumberColumnFilter' },
+  { field: 'dist_highway_km',    headerName: 'Autob. km', width: 95, filter: 'agNumberColumnFilter' },
+  { field: 'dist_city_km',       headerName: 'Stadt km',  width: 88, filter: 'agNumberColumnFilter' },
+  { field: 'schools',        headerName: 'Schulen',   width: 100, filter: 'agTextColumnFilter'  },
+  { field: 'garden',         headerName: 'Garten',    width: 100, filter: 'agTextColumnFilter'  },
+  { field: 'interesting_keywords', headerName: 'Keywords', width: 150, filter: 'agTextColumnFilter' },
+];
+
+const countEl = document.getElementById('count');
+
+agGrid.createGrid(document.getElementById('grid'), {
+  columnDefs,
+  rowData: PROPERTIES,
+  defaultColDef: {
+    sortable:       true,
+    resizable:      true,
+    floatingFilter: true,
+  },
+  rowHeight:            50,
+  headerHeight:         36,
+  floatingFiltersHeight: 32,
+  suppressCellFocus:    true,
+  getRowStyle(p) {
+    if (p.data.blacklist_keywords)   return { background: '#fff0f0' };
+    if (p.data.interesting_keywords) return { background: '#f0faf0' };
+  },
+  onFilterChanged(e) {
+    const ids = new Set();
+    e.api.forEachNodeAfterFilter(n => ids.add(n.data.id));
+    syncMapToIds(ids);
+    countEl.textContent = `${e.api.getDisplayedRowCount()} / ${PROPERTIES.length}`;
+  },
+  onGridReady(e) {
+    e.api.sizeColumnsToFit();
+    countEl.textContent = `${PROPERTIES.length} Inserate`;
+  },
+  onRowClicked(e) {
+    const m = markerById.get(e.data.id);
+    if (!m) return;
+    map.setView(m.getLatLng(), 13, { animate: true });
+    m.openPopup();
+  },
+});
+</script>
+</body>
+</html>
