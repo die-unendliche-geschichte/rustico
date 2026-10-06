@@ -313,6 +313,8 @@ init_db <- function(db_path) {
       interesting_keywords TEXT,
       is_blacklisted       INTEGER DEFAULT 0,
       image_path           TEXT,
+      lat                  REAL,
+      lon                  REAL,
       parsed_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
@@ -321,7 +323,8 @@ init_db <- function(db_path) {
   existing_prop_cols <- dbListFields(con, "properties")
   new_prop_cols <- list(
     region = "TEXT", condition = "TEXT", lage = "TEXT", ausblick = "TEXT",
-    bathrooms = "TEXT", basement = "TEXT", secondary_home = "TEXT", parking = "TEXT"
+    bathrooms = "TEXT", basement = "TEXT", secondary_home = "TEXT", parking = "TEXT",
+    lat = "REAL", lon = "REAL"
   )
   for (col in names(new_prop_cols)) {
     if (!col %in% existing_prop_cols)
@@ -749,6 +752,50 @@ analyze_page_structure <- function() {
   return(page)
 }
 
+# ── Geolocation ────────────────────────────────────────────────────────────────
+
+# Look up the centroid (WGS84 lat/lon) of each property's ZIP code polygon from
+# the Swiss official localities geodatabase and write lat/lon back to properties.
+# Re-running is safe: coordinates are updated in place for all matched rows.
+geolocate <- function(db_path  = "rustico_properties.sqlite",
+                      gdb_path = "data/AMTOVZ_GDB_LV95.gdb") {
+  if (!requireNamespace("sf", quietly = TRUE))
+    stop("Package 'sf' is required: install.packages('sf')")
+
+  zip <- sf::st_read(gdb_path, layer = "AMTOVZ_ZIP", quiet = TRUE)
+
+  # Compute centroid of each ZIP polygon and transform to WGS84
+  centroids     <- sf::st_centroid(sf::st_geometry(zip))
+  centroids_wgs <- sf::st_transform(centroids, 4326)
+  coords        <- sf::st_coordinates(centroids_wgs)
+
+  # Average coordinates for PLZs that span multiple polygons
+  lookup <- aggregate(
+    cbind(lon = coords[, 1], lat = coords[, 2]) ~ postal_code,
+    data = data.frame(postal_code = as.character(zip$ZIP4), coords,
+                      stringsAsFactors = FALSE),
+    FUN  = mean
+  )
+
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+  init_db(db_path)   # ensure lat/lon columns exist
+
+  props <- dbGetQuery(con, "SELECT id, postal_code FROM properties WHERE postal_code IS NOT NULL AND postal_code != ''")
+  joined <- merge(props, lookup, by = "postal_code", all.x = TRUE)
+
+  n_ok <- 0L
+  for (i in seq_len(nrow(joined))) {
+    if (!is.na(joined$lat[i])) {
+      dbExecute(con, "UPDATE properties SET lat = ?, lon = ? WHERE id = ?",
+                list(joined$lat[i], joined$lon[i], joined$id[i]))
+      n_ok <- n_ok + 1L
+    }
+  }
+
+  cat("Geolocated", n_ok, "of", nrow(props), "properties\n")
+}
+
 # ── Export ─────────────────────────────────────────────────────────────────────
 
 export_to_csv <- function(db_path = "rustico_properties.sqlite",
@@ -768,5 +815,6 @@ if (sys.nframe() == 0) {
   update_active_status()
   parse_and_enrich()
   apply_keywords()
+  geolocate()
   export_to_csv()
 }
