@@ -11,6 +11,9 @@ execute:
 library(DBI)
 library(RSQLite)
 library(dplyr)
+library(sf)
+library(crosstalk)
+library(leaflet)
 
 source("web_scraper.R")
 
@@ -49,6 +52,53 @@ prices     <- active$price_chf[!is.na(active$price_chf)]
 avg_price  <- if (length(prices) > 0) round(mean(prices) / 1000) else NA
 min_price  <- if (length(prices) > 0) min(prices) / 1000 else NA
 max_price  <- if (length(prices) > 0) max(prices) / 1000 else NA
+
+# Compute PLZ centroids for map markers
+zip_all   <- st_read("data/AMTOVZ_GDB_LV95.gdb", layer = "AMTOVZ_ZIP", quiet = TRUE)
+plzs      <- unique(active$postal_code[!is.na(active$postal_code)])
+zip_cents <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ] |>
+  dplyr::mutate(postal_code = as.character(ZIP4)) |>
+  dplyr::group_by(postal_code) |>
+  dplyr::summarise(.groups = "drop") |>
+  st_transform(4326) |>
+  st_centroid()
+coords      <- st_coordinates(zip_cents)
+centroid_df <- data.frame(postal_code = zip_cents$postal_code,
+                          map_lng = coords[, 1], map_lat = coords[, 2],
+                          stringsAsFactors = FALSE)
+
+# One row per property with display columns + coordinates for crosstalk
+map_data <- merge(active, centroid_df, by = "postal_code", all.x = TRUE) |>
+  dplyr::transmute(
+    Location    = paste0(postal_code, " ", city),
+    Region      = region,
+    Price       = ifelse(!is.na(price_chf),
+                         formatC(price_chf, format = "f", digits = 0, big.mark = "'"),
+                         purchase_price),
+    price_num   = price_chf,
+    `Living m²` = living_area_m2,
+    `Plot m²`   = plot_area_m2,
+    Rooms       = rooms_n,
+    Floors      = floors_n,
+    Condition   = condition,
+    Lage        = lage,
+    Ausblick    = ausblick,
+    Keywords    = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
+    Blacklist   = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
+    Link        = paste0('<a href="', property_link, '" target="_blank">open</a>'),
+    popup_html  = paste0(
+      "<b>", paste0(postal_code, " ", city), "</b><br>",
+      "CHF ", ifelse(!is.na(price_chf),
+                     formatC(price_chf, format = "f", digits = 0, big.mark = "'"), "—"),
+      "<br>",
+      ifelse(!is.na(living_area_m2), paste0(living_area_m2, " m² living<br>"), ""),
+      '<a href="', property_link, '" target="_blank">open listing</a>'
+    ),
+    lat         = map_lat,
+    lng         = map_lng
+  )
+
+shared <- SharedData$new(map_data)
 ```
 
 ## Row {height="15%"}
@@ -92,34 +142,19 @@ list(
 ```{r}
 library(DT)
 
-tbl <- active |>
-  transmute(
-    Location   = paste0(postal_code, " ", city),
-    Region     = region,
-    Price      = ifelse(!is.na(price_chf),
-                        formatC(price_chf, format = "f", digits = 0, big.mark = "'"),
-                        purchase_price),
-    `Living m²` = living_area_m2,
-    `Plot m²`   = plot_area_m2,
-    Rooms       = rooms_n,
-    Floors      = floors_n,
-    Condition   = condition,
-    Lage        = lage,
-    Ausblick    = ausblick,
-    Keywords    = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
-    Blacklist   = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
-    Link        = paste0('<a href="', property_link, '" target="_blank">open</a>')
-  )
-
 datatable(
-  tbl,
+  shared,
   escape    = FALSE,
   rownames  = FALSE,
   filter    = "top",
   options   = list(
     pageLength = 25,
     order      = list(list(2, "asc")),   # sort by price ascending
-    columnDefs = list(list(targets = 11, visible = FALSE))  # hide Blacklist by default
+    columnDefs = list(
+      list(targets = 3,             visible = FALSE),  # price_num (numeric, for map)
+      list(targets = 12,            visible = FALSE),  # Blacklist
+      list(targets = c(14, 15, 16), visible = FALSE)   # popup_html, lat, lng
+    )
   )
 ) |>
   formatStyle(
@@ -137,50 +172,25 @@ datatable(
 ### Map
 
 ```{r}
-library(tmap)
-library(sf)
+pal <- colorNumeric("Blues", domain = na.omit(map_data$price_num), na.color = "grey70")
 
-tmap_mode("view")
-
-# Load and filter ZIP polygons to the PLZs present in active properties
-zip_all  <- st_read("data/AMTOVZ_GDB_LV95.gdb", layer = "AMTOVZ_ZIP", quiet = TRUE)
-plzs     <- unique(active$postal_code[!is.na(active$postal_code)])
-zip_filt <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ]
-
-# Union polygons per PLZ (some PLZs span multiple polygons), then reproject
-zip_filt$postal_code <- as.character(zip_filt$ZIP4)
-zip_union <- zip_filt |>
-  dplyr::group_by(postal_code) |>
-  dplyr::summarise(.groups = "drop") |>
-  st_transform(4326)
-
-# Per-PLZ summaries
-prop_summary <- do.call(rbind, lapply(plzs, function(plz) {
-  rows <- active[active$postal_code == plz & !is.na(active$postal_code), ]
-  data.frame(
-    postal_code = plz,
-    city        = rows$city[1],
-    n           = nrow(rows),
-    prices      = paste0("CHF ", paste(
-      formatC(sort(rows$price_chf, na.last = TRUE), format = "f", digits = 0, big.mark = "'"),
-      collapse = " / CHF "
-    )),
-    stringsAsFactors = FALSE
+leaflet(shared) |>
+  addProviderTiles(providers$OpenStreetMap) |>
+  addCircleMarkers(
+    lng         = ~lng,
+    lat         = ~lat,
+    radius      = 8,
+    color       = "white",
+    weight      = 1,
+    fillColor   = ~pal(price_num),
+    fillOpacity = 0.85,
+    popup       = ~popup_html
+  ) |>
+  addLegend(
+    position = "bottomright",
+    pal      = pal,
+    values   = na.omit(map_data$price_num),
+    title    = "Price (CHF)",
+    na.label = "—"
   )
-}))
-
-zip_data <- merge(zip_union, prop_summary, by = "postal_code")
-
-tm_shape(zip_data) +
-  tm_polygons(
-    fill        = "n",
-    fill.scale  = tm_scale_continuous(values = "brewer.blues"),
-    fill.legend = tm_legend(title = "Listings"),
-    fill_alpha  = 0.7,
-    col         = "white",
-    lwd         = 1.5,
-    id          = "postal_code",
-    popup.vars  = c("City" = "city", "Listings" = "n", "Prices" = "prices")
-  ) +
-  tm_basemap("OpenStreetMap")
 ```

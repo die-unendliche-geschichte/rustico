@@ -500,17 +500,27 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
       clean_url      <- sub("\\?.*$", "", row$image_url)
       file_extension <- tools::file_ext(basename(clean_url))
       if (!nzchar(file_extension)) file_extension <- "jpg"
-      filename <- paste0("property_", row$page, "_", row$position, ".", file_extension)
+      slug     <- if (!is.na(row$property_link))
+        basename(sub("\\?.*$", "", row$property_link))
+      else
+        as.character(row$id)
+      filename  <- paste0(slug, ".", file_extension)
+      full_path <- file.path("images", gsub("[^A-Za-z0-9._-]", "_", filename))
 
-      cat("[", row_idx, "/", nrow(unparsed), "] Downloading image...")
-      downloaded_path <- download_image(row$image_url, filename)
-      if (!is.na(downloaded_path)) {
-        image_path <- downloaded_path
-        cat(" OK\n")
+      if (file.exists(full_path)) {
+        image_path <- full_path
+        cat("[", row_idx, "/", nrow(unparsed), "] Image already exists, skipping\n")
       } else {
-        cat(" Failed\n")
+        cat("[", row_idx, "/", nrow(unparsed), "] Downloading image...")
+        downloaded_path <- download_image(row$image_url, filename)
+        if (!is.na(downloaded_path)) {
+          image_path <- downloaded_path
+          cat(" OK\n")
+        } else {
+          cat(" Failed\n")
+        }
+        Sys.sleep(0.5)
       }
-      Sys.sleep(0.5)
     }
 
     tryCatch({

@@ -9,7 +9,12 @@ extraction, keyword tagging, and active/inactive tracking.
 ## Requirements
 
 ```r
+# Scraper
 install.packages(c("rvest", "httr", "dplyr", "DBI", "RSQLite"))
+
+# Dashboard
+install.packages(c("DT", "crosstalk", "leaflet", "sf"))
+# Also requires Quarto: https://quarto.org/docs/get-started/
 ```
 
 ---
@@ -97,9 +102,11 @@ parse_and_enrich(db_path = "rustico_properties.sqlite")
 
 - Processes only rows in `raw_properties` that have no entry in `properties`, or
   where `raw_properties.scraped_at > properties.parsed_at` (re-scraped since last parse).
-- Downloads the thumbnail image for each property into `images/`.
+- Downloads the thumbnail image for each property into `images/`. Images are named
+  after the last path segment of `property_link` (e.g. `tiimmobili-12345.jpg`),
+  so filenames are stable across re-runs. Already-downloaded images are skipped.
 - Safe to re-run: already up-to-date rows are skipped.
-- To re-parse everything from scratch: `DELETE FROM properties`, then re-run.
+- To re-parse everything from scratch: `DELETE FROM properties`, delete `images/`, then re-run.
 
 ### Step 4 — `apply_keywords()`
 
@@ -196,8 +203,18 @@ Derived from `raw_properties`. Can be dropped and rebuilt at any time.
 | `description` | TEXT | Free-text description (before structured fields) |
 | `blacklist_keywords` | TEXT | Comma-separated matched blacklist terms |
 | `interesting_keywords` | TEXT | Comma-separated matched interesting terms |
+| `region` | TEXT | Geographical region (e.g. Sottoceneri) |
+| `condition` | TEXT | Property condition |
+| `lage` | TEXT | Location quality description |
+| `ausblick` | TEXT | View description |
+| `bathrooms` | TEXT | Badezimmer |
+| `basement` | TEXT | Keller |
+| `secondary_home` | TEXT | Zweitwohnung flag |
+| `parking` | TEXT | Parking info |
 | `is_blacklisted` | INTEGER | 1 if any blacklist keyword matched |
 | `image_path` | TEXT | Local path to downloaded thumbnail |
+| `lat` | REAL | Latitude (reserved) |
+| `lon` | REAL | Longitude (reserved) |
 | `parsed_at` | DATETIME | When this row was last parsed |
 
 ### `scraped_pages`
@@ -238,11 +255,34 @@ apply_keywords()
 
 ---
 
+## Dashboard
+
+`index.qmd` is a Quarto dashboard that reads from the SQLite database and renders
+an interactive HTML report.
+
+```bash
+quarto preview index.qmd   # live preview
+quarto render  index.qmd   # build index.html
+```
+
+The dashboard shows:
+- **Value boxes** — total listings, active count, average and range of prices
+- **Properties tab** — filterable DT table with per-column filters
+- **Map tab** — leaflet map with one circle marker per property, placed at the PLZ
+  centroid; marker colour encodes price. Table filters drive the map via crosstalk —
+  filtering by region or price range highlights only the matching markers.
+
+Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the map.
+
+---
+
 ## File structure
 
 ```
 web_scraper.R               — all scraping, parsing, and DB logic
+index.qmd                   — Quarto dashboard
 rustico_properties.sqlite   — SQLite database (created on first run)
 rustico_properties.csv      — CSV export (created by export_to_csv())
-images/                     — downloaded property thumbnails
+images/                     — downloaded property thumbnails (named by property_link slug)
+data/AMTOVZ_GDB_LV95.gdb   — Swiss ZIP polygons (for map centroids)
 ```
