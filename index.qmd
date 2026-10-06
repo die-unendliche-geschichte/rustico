@@ -7,6 +7,7 @@ execute:
   message: false
 ---
 
+
 ```{r setup}
 library(DBI)
 library(RSQLite)
@@ -190,7 +191,13 @@ leaflet(shared) |>
     weight      = 1,
     fillColor   = "#aaa",
     fillOpacity = 0.4,
-    label       = ~postal_code
+    label       = ~postal_code,
+    highlight   = highlightOptions(
+      color       = "#000",
+      weight      = 3,
+      fillOpacity = 0.6,
+      bringToFront = TRUE
+    )
   ) |>
   addCircleMarkers(
     lng            = ~lng,
