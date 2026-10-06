@@ -47,7 +47,12 @@ download_image <- function(image_url, filename) {
 
 scrape_website <- function(url, css_selector = NULL) {
   tryCatch({
-    page <- read_html(url)
+    response <- GET(url, config(ssl_verifypeer = FALSE))
+    if (http_error(response)) {
+      cat("HTTP error:", status_code(response), "\n")
+      return(NULL)
+    }
+    page <- read_html(content(response, "text", encoding = "UTF-8"))
     if (is.null(css_selector)) return(page)
     page %>% html_elements(css_selector) %>% html_text(trim = TRUE)
   }, error = function(e) {
@@ -114,25 +119,53 @@ extract_m2 <- function(x) {
 
 # Parse all structured fields out of a property's raw text content.
 #
-# Handles both the compact format ("Zimmer:4Heizung:...") and the
-# spaced-out key/value format ("Kaufpreis:\nCHF 59.000,-\n...") by
-# normalising whitespace first, then using all known label names as
-# look-ahead anchors so each field value stops at the next label.
+# Listing cards start with a header "PLZ, ORT : XXXX City" immediately followed
+# (no space) by the first field label. This header is extracted first, then
+# stripped so the label-based extraction is clean. Labels cover both listing
+# card fields (Region, Etagen, Lage, Ausblick, …) and detail-page fields
+# (Objekt Nummer, Adresse, …) for future use.
 parse_property_text <- function(text) {
+  text <- gsub("\u00a0", " ", text)      # non-breaking space → regular space
   text <- gsub("\\s+", " ", trimws(text))
 
+  # Extract PLZ/ORT from "PLZ, ORT : XXXX City" prefix.
+  # The city name runs directly into the first label (no separator), so we
+  # strip everything from the first label onwards to isolate the header,
+  # parse it, then remove the header from text.
+  postal_code <- NA_character_
+  city        <- NA_character_
+  header <- sub("(?i)(?:Kaufpreis|Wohnfl\u00e4che).*$", "", text, perl = TRUE)
+  plz_m  <- regmatches(header, regexec(
+    "PLZ, ORT : ([0-9]{4}) (.+)$", trimws(header)
+  ))[[1]]
+  if (length(plz_m) >= 3) {
+    postal_code <- trimws(plz_m[2])
+    city        <- trimws(plz_m[3])
+    text        <- trimws(substring(text, nchar(header) + 1))
+  }
+
   labels <- c(
-    object_number  = "Objekt\\s*Nummer",
-    object_type    = "Objekt\\s*Typ",
-    state          = "Bundesland",
-    address        = "Adresse",
+    # ── Listing card fields ──────────────────────────────────────────────────
     purchase_price = "Kaufpreis",
     living_area    = "Wohnfl\u00e4che",
     plot_area      = "Grundst\u00fccks(?:gr\u00f6sse|gr\u00f6\u00dfe|groesse)",
     built_area     = "verbaute\\s*Fl\u00e4che",
-    rooms          = "Zimmer",
+    region         = "Region",
+    condition      = "Zustand",
+    bathrooms      = "Dusche/WC",
+    basement       = "Keller",
+    secondary_home = "Zweitwohnsitz",
+    parking        = "Parkpl\u00e4tze",
+    lage           = "Lage",
+    ausblick       = "Ausblick",
+    floors         = "(?:Etagen|Geschosszahl)",
     heating        = "Heizung",
-    floors         = "Geschosszahl",
+    # ── Detail page fields (populated when scraping individual listings) ─────
+    object_number  = "Objekt\\s*Nummer",
+    object_type    = "Objekt\\s*Typ",
+    state          = "Bundesland",
+    address        = "Adresse",
+    rooms          = "Zimmer",
     noise_level    = "L\u00e4rmbelastung"
   )
 
@@ -151,26 +184,23 @@ parse_property_text <- function(text) {
     }
   }
 
-  # Extract free-text description: everything before the first known label
+  # Free-text description: any text before the first known label
   first_label_pos <- regexpr(paste0("(?i)(?:", all_labels_pat, ")"), text, perl = TRUE)
-  result$description <- if (first_label_pos[1] > 1) {
-    trimws(substr(text, 1, first_label_pos[1] - 1))
-  } else {
-    NA_character_
-  }
+  pre_label <- if (first_label_pos[1] > 1) trimws(substr(text, 1, first_label_pos[1] - 1)) else ""
+  result$description <- if (nzchar(pre_label)) pre_label else NA_character_
 
-  # Derive postal code and city from address field (e.g. "6658 Borgnone")
-  addr <- result$address
-  if (!is.na(addr)) {
-    addr_m <- regmatches(addr, regexec("^([0-9]{4})\\s+(.+)$", trimws(addr)))[[1]]
-    result$postal_code <- if (length(addr_m) >= 3) addr_m[2] else NA_character_
-    result$city        <- if (length(addr_m) >= 3) addr_m[3] else NA_character_
-  } else {
-    result$postal_code <- NA_character_
-    result$city        <- NA_character_
+  # Postal code fallback: derive from Adresse field on detail pages
+  if (is.na(postal_code) && !is.na(result$address)) {
+    addr_m <- regmatches(result$address, regexec("^([0-9]{4})\\s+(.+)$", trimws(result$address)))[[1]]
+    if (length(addr_m) >= 3) {
+      postal_code <- addr_m[2]
+      city        <- addr_m[3]
+    }
   }
+  result$postal_code <- postal_code
+  result$city        <- city
 
-  # Parse numeric forms of the key fields
+  # Numeric conversions
   result$price_chf      <- as.numeric(gsub("[^0-9]", "", sub("CHF\\s*", "", result$purchase_price)))
   result$living_area_m2 <- extract_m2(result$living_area)
   result$plot_area_m2   <- extract_m2(result$plot_area)
@@ -233,15 +263,34 @@ init_db <- function(db_path) {
       heating        TEXT,
       floors         TEXT,
       floors_n       REAL,
-      noise_level         TEXT,
-      description         TEXT,
-      blacklist_keywords  TEXT,
+      noise_level          TEXT,
+      region               TEXT,
+      condition            TEXT,
+      lage                 TEXT,
+      ausblick             TEXT,
+      bathrooms            TEXT,
+      basement             TEXT,
+      secondary_home       TEXT,
+      parking              TEXT,
+      description          TEXT,
+      blacklist_keywords   TEXT,
       interesting_keywords TEXT,
-      is_blacklisted      INTEGER DEFAULT 0,
-      image_path          TEXT,
-      parsed_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+      is_blacklisted       INTEGER DEFAULT 0,
+      image_path           TEXT,
+      parsed_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
+
+  # Migrate existing properties tables
+  existing_prop_cols <- dbListFields(con, "properties")
+  new_prop_cols <- list(
+    region = "TEXT", condition = "TEXT", lage = "TEXT", ausblick = "TEXT",
+    bathrooms = "TEXT", basement = "TEXT", secondary_home = "TEXT", parking = "TEXT"
+  )
+  for (col in names(new_prop_cols)) {
+    if (!col %in% existing_prop_cols)
+      dbExecute(con, sprintf("ALTER TABLE properties ADD COLUMN %s %s", col, new_prop_cols[[col]]))
+  }
 
   dbExecute(con, "
     CREATE TABLE IF NOT EXISTS scraped_pages (
@@ -331,6 +380,8 @@ scrape_raw <- function(max_pages = 233, items_per_page = 2,
             property_link <- if (startsWith(rel, "http")) rel
             else if (startsWith(rel, "/")) paste0("https://immobiliensuche.edireal.com", rel)
             else paste0("https://immobiliensuche.edireal.com/tiimmobili.ch/", rel)
+            # Normalise ./  in path (e.g. /tiimmobili.ch/./immobilien/ → /tiimmobili.ch/immobilien/)
+            property_link <- gsub("/\\./", "/", property_link)
           }
         }
 
@@ -433,8 +484,10 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           living_area, living_area_m2, plot_area, plot_area_m2,
           built_area, built_area_m2, rooms, rooms_n,
           heating, floors, floors_n, noise_level,
+          region, condition, lage, ausblick,
+          bathrooms, basement, secondary_home, parking,
           description, image_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         list(
           row$id, row$property_link,
           parsed$object_number, parsed$object_type, parsed$state,
@@ -446,6 +499,8 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           parsed$rooms,          parsed$rooms_n,
           parsed$heating, parsed$floors, parsed$floors_n,
           parsed$noise_level,
+          parsed$region, parsed$condition, parsed$lage, parsed$ausblick,
+          parsed$bathrooms, parsed$basement, parsed$secondary_home, parsed$parking,
           parsed$description, image_path
         )
       )
@@ -548,15 +603,17 @@ test_parse <- function(n_pages = 1, items_per_page = 2,
     parsed <- parse_property_text(row$raw_text)
 
     cat(sprintf("--- Property %d  (page %d, pos %d) ---\n", i, row$page, row$position))
-    cat("Description :", parsed$description, "\n")
-    cat("Object      :", parsed$object_number, "|", parsed$object_type, "\n")
-    cat("Address     :", parsed$address, " ->", parsed$postal_code, parsed$city, "\n")
+    cat("Location    :", parsed$postal_code, parsed$city, "\n")
     cat("Price       : CHF", parsed$price_chf, "  (raw:", parsed$purchase_price, ")\n")
     cat("Living area :", parsed$living_area_m2, "m²  Plot:", parsed$plot_area_m2,
-        "m²  Built:", parsed$built_area_m2, "m²\n")
-    cat("Rooms       :", parsed$rooms_n, "  Floors:", parsed$floors_n, "\n")
+        "m²  Floors:", parsed$floors_n, "\n")
+    cat("Region      :", parsed$region, "\n")
+    cat("Condition   :", parsed$condition, "\n")
+    cat("Lage        :", parsed$lage, "\n")
+    cat("Ausblick    :", parsed$ausblick, "\n")
     cat("Heating     :", parsed$heating, "\n")
-    cat("Noise level :", parsed$noise_level, "\n")
+    cat("Parking     :", parsed$parking, "\n")
+    cat("Description :", parsed$description, "\n")
     cat("Link        :", row$property_link, "\n")
     cat("\n")
   }
