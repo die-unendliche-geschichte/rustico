@@ -8,6 +8,15 @@ execute:
 ---
 
 ```{r setup}
+# Load .Renviron anchored to the document's own directory, so quarto preview
+# picks it up regardless of the terminal's working directory
+local({
+  doc_dir <- dirname(normalizePath(knitr::current_input(), mustWork = FALSE))
+  f <- file.path(doc_dir, ".Renviron")
+  if (file.exists(f)) {
+    readRenviron(f)
+  }
+})
 library(DBI)
 library(RSQLite)
 library(dplyr)
@@ -85,10 +94,11 @@ list(
 )
 ```
 
-## Row {height="85%"}
+## Row {height="85%" .tabset}
+
+### Properties
 
 ```{r}
-#| title: "Properties"
 library(DT)
 
 tbl <- active |>
@@ -133,44 +143,53 @@ datatable(
   )
 ```
 
-# Map
+### Map
 
 ```{r}
-#| title: "Map"
-library(leaflet)
+library(tmap)
+library(sf)
 
-geo <- active[!is.na(active$lat) & !is.na(active$lon), ]
+tmap_mode("view")
 
-pal <- colorNumeric("YlOrRd", domain = geo$price_chf, na.color = "#aaaaaa")
+# Load and filter ZIP polygons to the PLZs present in active properties
+zip_all  <- st_read("data/AMTOVZ_GDB_LV95.gdb", layer = "AMTOVZ_ZIP", quiet = TRUE)
+plzs     <- unique(active$postal_code[!is.na(active$postal_code)])
+zip_filt <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ]
 
-popup_html <- paste0(
-  "<b>", geo$postal_code, " ", geo$city, "</b><br>",
-  "CHF ", formatC(geo$price_chf, format = "f", digits = 0, big.mark = "'"), "<br>",
-  ifelse(!is.na(geo$living_area_m2), paste0(geo$living_area_m2, " m² Wohnfl. &nbsp;"), ""),
-  ifelse(!is.na(geo$plot_area_m2),   paste0(geo$plot_area_m2,   " m² Grundstück"), ""),
-  ifelse(!is.na(geo$condition), paste0("<br>", geo$condition), ""),
-  ifelse(!is.na(geo$lage),      paste0("<br>", geo$lage), ""),
-  "<br><a href='", geo$property_link, "' target='_blank'>Details &rarr;</a>"
-)
+# Union polygons per PLZ (some PLZs span multiple polygons), then reproject
+zip_filt$postal_code <- as.character(zip_filt$ZIP4)
+zip_union <- zip_filt |>
+  dplyr::group_by(postal_code) |>
+  dplyr::summarise(.groups = "drop") |>
+  st_transform(4326)
 
-leaflet(geo) |>
-  addProviderTiles(providers$CartoDB.Positron) |>
-  addCircleMarkers(
-    lng    = ~lon,
-    lat    = ~lat,
-    radius = ~pmax(6, pmin(18, sqrt(living_area_m2 / pi))),
-    color  = ~pal(price_chf),
-    fillColor  = ~pal(price_chf),
-    fillOpacity = 0.85,
-    stroke = TRUE,
-    weight = 1,
-    popup  = popup_html
-  ) |>
-  addLegend(
-    position = "bottomright",
-    pal      = pal,
-    values   = ~price_chf,
-    title    = "Price (CHF)",
-    labFormat = labelFormat(prefix = "CHF ", big.mark = "'")
+# Per-PLZ summaries
+prop_summary <- do.call(rbind, lapply(plzs, function(plz) {
+  rows <- active[active$postal_code == plz & !is.na(active$postal_code), ]
+  data.frame(
+    postal_code = plz,
+    city        = rows$city[1],
+    n           = nrow(rows),
+    prices      = paste0("CHF ", paste(
+      formatC(sort(rows$price_chf, na.last = TRUE), format = "f", digits = 0, big.mark = "'"),
+      collapse = " / CHF "
+    )),
+    stringsAsFactors = FALSE
   )
+}))
+
+zip_data <- merge(zip_union, prop_summary, by = "postal_code")
+
+tm_shape(zip_data) +
+  tm_polygons(
+    fill        = "n",
+    fill.scale  = tm_scale_continuous(values = "brewer.blues"),
+    fill.legend = tm_legend(title = "Listings"),
+    fill_alpha  = 0.7,
+    col         = "white",
+    lwd         = 1.5,
+    id          = "postal_code",
+    popup.vars  = c("City" = "city", "Listings" = "n", "Prices" = "prices")
+  ) +
+  tm_basemap("CartoDB.Positron", api = Sys.getenv("CARTO_TOKEN"))
 ```
