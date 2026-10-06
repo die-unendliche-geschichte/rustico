@@ -119,45 +119,74 @@ extract_m2 <- function(x) {
 
 # Parse all structured fields out of a property's raw text content.
 #
-# Listing cards start with a header "PLZ, ORT : XXXX City" immediately followed
-# (no space) by the first field label. This header is extracted first, then
-# stripped so the label-based extraction is clean. Labels cover both listing
-# card fields (Region, Etagen, Lage, Ausblick, …) and detail-page fields
-# (Objekt Nummer, Adresse, …) for future use.
+# Each listing card has two parts:
+#   Line 1 — inline summary: "PLZ, ORT : XXXX CityKaufpreis: CHF X,-Wohnfläche:Ym²[extras]"
+#   Lines 2+ — structured label:value fields (Region, Zustand, Etagen, …)
+#
+# The inline summary is processed separately so that Kaufpreis/Wohnfläche are
+# read from it directly, avoiding double-matching when Wohnfläche also appears
+# in the structured section.  Labels cover both listing-card fields and future
+# detail-page fields (Objekt Nummer, Adresse, …).
 parse_property_text <- function(text) {
-  text <- gsub("\u00a0", " ", text)      # non-breaking space → regular space
-  text <- gsub("\\s+", " ", trimws(text))
+  text <- gsub("\u00a0", " ", text)   # non-breaking space → regular space
 
-  # Extract PLZ/ORT from "PLZ, ORT : XXXX City" prefix.
-  # The city name runs directly into the first label (no separator), so we
-  # strip everything from the first label onwards to isolate the header,
-  # parse it, then remove the header from text.
+  # ── Split on newlines to separate the inline summary (line 1) ───────────────
+  lines <- trimws(strsplit(text, "\n")[[1]])
+  lines <- lines[nzchar(lines)]
+  first_line <- if (length(lines) >= 1) lines[1] else ""
+
+  # ── PLZ / ORT from the inline summary ───────────────────────────────────────
   postal_code <- NA_character_
   city        <- NA_character_
-  header <- sub("(?i)(?:Kaufpreis|Wohnfl\u00e4che).*$", "", text, perl = TRUE)
-  plz_m  <- regmatches(header, regexec(
-    "PLZ, ORT : ([0-9]{4}) (.+)$", trimws(header)
-  ))[[1]]
+  header <- sub("(?i)(?:Kaufpreis|Wohnfl\u00e4che|Nutzfl\u00e4che).*$", "", first_line, perl = TRUE)
+  plz_m  <- regmatches(header, regexec("PLZ, ORT : ([0-9]{4}) (.+)$", trimws(header)))[[1]]
   if (length(plz_m) >= 3) {
     postal_code <- trimws(plz_m[2])
     city        <- trimws(plz_m[3])
-    text        <- trimws(substring(text, nchar(header) + 1))
   }
 
+  # ── Kaufpreis from the inline summary (never appears in structured section) ──
+  m_price <- regmatches(first_line, regexpr(
+    "(?i)Kaufpreis:?\\s*(CHF\\s*[\\d.,]+[,-]+)", first_line, perl = TRUE))
+  inline_purchase_price <- if (length(m_price) > 0)
+    trimws(sub("(?i)Kaufpreis:?\\s*", "", m_price, perl = TRUE))
+  else
+    NA_character_
+  inline_price_chf <- if (!is.na(inline_purchase_price))
+    as.numeric(gsub("[^0-9]", "", sub("CHF\\s*", "", inline_purchase_price)))
+  else
+    NA_real_
+
+  # ── Build structured-section text ───────────────────────────────────────────
+  # Strip the "Kaufpreis:…Wohnfläche:Xm²" prefix from line 1 so it cannot
+  # interfere with field extraction.  Any trailing content on line 1 (e.g.
+  # neighbourhood note, "Standort | Umgebung") is kept as it may be useful.
+  after_summary <- trimws(sub(
+    "(?i).*(?:Wohnfl\u00e4che|Nutzfl\u00e4che):?\\s*[\\d.,]+\\s*m(?:\u00b2|2)\\s*",
+    "", first_line, perl = TRUE
+  ))
+  struct_lines <- c(
+    if (nzchar(after_summary)) after_summary,
+    if (length(lines) > 1) lines[-1]
+  )
+  # Remove site-navigation artefacts before label extraction
+  text <- gsub("(?i)\\bDetails\\s+Merken\\b", "", paste(struct_lines, collapse = " "), perl = TRUE)
+  text <- gsub("\\s+", " ", trimws(text))
+
+  # ── Label patterns ───────────────────────────────────────────────────────────
   labels <- c(
     # ── Listing card fields ──────────────────────────────────────────────────
-    purchase_price = "Kaufpreis",
-    living_area    = "Wohnfl\u00e4che",
-    plot_area      = "Grundst\u00fccks(?:gr\u00f6sse|gr\u00f6\u00dfe|groesse)",
+    living_area    = "(?:Wohn|Nutz)fl\u00e4che",
+    plot_area      = "Grundst\u00fccks?(?:gr\u00f6(?:sse|\u00dfe)|groesse|fl\u00e4che)",
     built_area     = "verbaute\\s*Fl\u00e4che",
     region         = "Region",
     condition      = "Zustand",
-    bathrooms      = "Dusche/WC",
+    bathrooms      = "(?:Dusche|Badezimmer|Bad)/WC",
     basement       = "Keller",
     secondary_home = "Zweitwohnsitz",
-    parking        = "Parkpl\u00e4tze",
+    parking        = "Parkpl(?:\u00e4tze?|atz)",
     lage           = "Lage",
-    ausblick       = "Ausblick",
+    ausblick       = "(?:Ausblick|Aussicht)",
     floors         = "(?:Etagen|Geschosszahl)",
     heating        = "Heizung",
     # ── Detail page fields (populated when scraping individual listings) ─────
@@ -175,23 +204,27 @@ parse_property_text <- function(text) {
   for (col_name in names(labels)) {
     pat <- paste0(
       "(?i)(?:", labels[[col_name]], ")\\s*:?\\s*(.*?)(?=\\s*(?:",
-      all_labels_pat, ")|$)"
+      all_labels_pat, ")\\s*:|$)"
     )
     m <- regmatches(text, regexpr(pat, text, perl = TRUE))
     if (length(m) > 0 && nchar(m) > 0) {
       strip_pat <- paste0("^(?i)(?:", labels[[col_name]], ")\\s*:?\\s*")
-      result[[col_name]] <- trimws(sub(strip_pat, "", m, perl = TRUE))
+      val <- trimws(sub(strip_pat, "", m, perl = TRUE))
+      # Strip "mehr... Details Merken" trailing artefacts
+      val <- trimws(sub("\\s*mehr\\.\\.\\..*$", "", val, perl = TRUE))
+      result[[col_name]] <- if (nzchar(val)) val else NA_character_
     }
   }
 
-  # Free-text description: any text before the first known label
-  first_label_pos <- regexpr(paste0("(?i)(?:", all_labels_pat, ")"), text, perl = TRUE)
+  # ── Free-text description ────────────────────────────────────────────────────
+  first_label_pos <- regexpr(paste0("(?i)(?:", all_labels_pat, ")\\s*:"), text, perl = TRUE)
   pre_label <- if (first_label_pos[1] > 1) trimws(substr(text, 1, first_label_pos[1] - 1)) else ""
   result$description <- if (nzchar(pre_label)) pre_label else NA_character_
 
-  # Postal code fallback: derive from Adresse field on detail pages
+  # ── Postal code fallback: derive from Adresse field on detail pages ──────────
   if (is.na(postal_code) && !is.na(result$address)) {
-    addr_m <- regmatches(result$address, regexec("^([0-9]{4})\\s+(.+)$", trimws(result$address)))[[1]]
+    addr_m <- regmatches(result$address,
+      regexec("^([0-9]{4})\\s+(.+)$", trimws(result$address)))[[1]]
     if (length(addr_m) >= 3) {
       postal_code <- addr_m[2]
       city        <- addr_m[3]
@@ -200,8 +233,11 @@ parse_property_text <- function(text) {
   result$postal_code <- postal_code
   result$city        <- city
 
-  # Numeric conversions
-  result$price_chf      <- as.numeric(gsub("[^0-9]", "", sub("CHF\\s*", "", result$purchase_price)))
+  # ── Price — always from the inline summary ───────────────────────────────────
+  result$purchase_price <- inline_purchase_price
+  result$price_chf      <- inline_price_chf
+
+  # ── Numeric conversions ──────────────────────────────────────────────────────
   result$living_area_m2 <- extract_m2(result$living_area)
   result$plot_area_m2   <- extract_m2(result$plot_area)
   result$built_area_m2  <- extract_m2(result$built_area)

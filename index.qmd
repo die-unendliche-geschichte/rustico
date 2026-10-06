@@ -1,0 +1,134 @@
+---
+title: "Rustico Suche"
+format: dashboard
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+source("web_scraper.R")
+
+con <- dbConnect(SQLite(), "rustico_properties.sqlite")
+
+# Prefer the parsed properties table; fall back to inline parsing from raw
+n_props <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties")$n
+
+if (n_props > 0) {
+  props <- dbGetQuery(con, "
+    SELECT p.*, r.last_seen, r.is_active, r.image_url
+    FROM properties p
+    JOIN raw_properties r ON r.id = p.raw_id
+  ")
+} else {
+  raw <- dbGetQuery(con, "SELECT * FROM raw_properties ORDER BY page, position")
+  props <- bind_rows(lapply(seq_len(nrow(raw)), function(i) {
+    row   <- raw[i, ]
+    parsed <- parse_property_text(row$raw_text)
+    parsed$property_link <- row$property_link
+    parsed$is_active     <- row$is_active
+    parsed$last_seen     <- row$last_seen
+    parsed$image_url     <- row$image_url
+    parsed$image_path    <- NA_character_
+    parsed
+  }))
+}
+
+dbDisconnect(con)
+
+active  <- props[!is.na(props$is_active) & props$is_active == 1, ]
+n_total <- nrow(props)
+n_active <- nrow(active)
+
+prices     <- active$price_chf[!is.na(active$price_chf)]
+avg_price  <- if (length(prices) > 0) round(mean(prices) / 1000) else NA
+min_price  <- if (length(prices) > 0) min(prices) / 1000 else NA
+max_price  <- if (length(prices) > 0) max(prices) / 1000 else NA
+```
+
+## Row {height="15%"}
+
+```{r}
+#| content: valuebox
+#| title: "Total listings"
+list(icon = "house", color = "light", value = n_total)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Active"
+list(icon = "check-circle", color = "success", value = n_active)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Avg price"
+list(
+  icon  = "tag",
+  color = "info",
+  value = if (!is.na(avg_price)) paste0("CHF ", avg_price, "k") else "—"
+)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Price range"
+list(
+  icon  = "arrow-left-right",
+  color = "light",
+  value = if (!is.na(min_price)) paste0("CHF ", min_price, "k – ", max_price, "k") else "—"
+)
+```
+
+## Row {height="85%"}
+
+```{r}
+#| title: "Properties"
+library(DT)
+
+tbl <- active |>
+  transmute(
+    Location   = paste0(postal_code, " ", city),
+    Region     = region,
+    Price      = ifelse(!is.na(price_chf),
+                        formatC(price_chf, format = "f", digits = 0, big.mark = "'"),
+                        purchase_price),
+    `Living m²` = living_area_m2,
+    `Plot m²`   = plot_area_m2,
+    Rooms       = rooms_n,
+    Floors      = floors_n,
+    Condition   = condition,
+    Lage        = lage,
+    Ausblick    = ausblick,
+    Keywords    = ifelse(!is.na(interesting_keywords), interesting_keywords, ""),
+    Blacklist   = ifelse(!is.na(blacklist_keywords), blacklist_keywords, ""),
+    Link        = paste0('<a href="', property_link, '" target="_blank">open</a>')
+  )
+
+datatable(
+  tbl,
+  escape    = FALSE,
+  rownames  = FALSE,
+  filter    = "top",
+  options   = list(
+    pageLength = 25,
+    order      = list(list(2, "asc")),   # sort by price ascending
+    columnDefs = list(list(targets = 11, visible = FALSE))  # hide Blacklist by default
+  )
+) |>
+  formatStyle(
+    "Keywords",
+    backgroundColor = styleInterval(0, c("white", "#e8f5e9")),
+    target = "cell"
+  ) |>
+  formatStyle(
+    "Blacklist",
+    backgroundColor = styleInterval(0, c("white", "#ffebee")),
+    target = "cell"
+  )
+```
