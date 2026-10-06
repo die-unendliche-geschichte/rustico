@@ -1,6 +1,8 @@
 library(rvest)
 library(dplyr)
 library(httr)
+library(DBI)
+library(RSQLite)
 
 # Function to download image
 download_image <- function(image_url, filename) {
@@ -203,68 +205,101 @@ analyze_page_structure <- function() {
   }
 }
 
-scrape_all_properties <- function(max_pages = 233, items_per_page = 2) {
+init_db <- function(db_path) {
+  con <- dbConnect(SQLite(), db_path)
+
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS properties (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      page           INTEGER,
+      position       INTEGER,
+      postal_code    TEXT,
+      city           TEXT,
+      price          TEXT,
+      living_area    TEXT,
+      property_link  TEXT UNIQUE,
+      image_path     TEXT,
+      full_text      TEXT,
+      scraped_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  ")
+
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS scraped_pages (
+      page_idx    INTEGER PRIMARY KEY,
+      items_found INTEGER,
+      scraped_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  ")
+
+  return(con)
+}
+
+scrape_all_properties <- function(max_pages = 233, items_per_page = 2, db_path = "rustico_properties.sqlite") {
   base_url <- "https://immobiliensuche.edireal.com/tiimmobili.ch/search?sorting=MODIFICATION_DATE&estates-view=list-view&offerType=SELL&country=CH&category=8&priceFrom&priceTo&areaFrom&areaTo&groundAreaFrom&groundAreaTo&roomNumberFrom&roomNumberTo"
-  
-  all_properties_list <- vector("list", max_pages * items_per_page)
-  list_idx <- 0L
+
+  con <- init_db(db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  done_pages <- dbGetQuery(con, "SELECT page_idx FROM scraped_pages")$page_idx
 
   cat("=== SCRAPING ALL PROPERTIES ===\n")
   cat("Max pages to scrape:", max_pages, "\n")
-  cat("Items per page:", items_per_page, "\n\n")
-  
+  cat("Items per page:", items_per_page, "\n")
+  cat("Already scraped:", length(done_pages), "pages\n\n")
+
   for (page_idx in 0:(max_pages - 1)) {
+    if (page_idx %in% done_pages) {
+      cat("Skipping page", page_idx + 1, "(already scraped)\n")
+      next
+    }
+
     url <- paste0(base_url, "&itemsPerPage=", items_per_page, "&pageIdx=", page_idx)
-    
+
     cat("Scraping page", page_idx + 1, "...")
 
     page <- scrape_with_retry(url)
 
     if (!is.null(page)) {
       estate_items <- page %>% html_elements(".estate-item")
-      
+
       if (length(estate_items) == 0) {
         cat(" No more properties found. Stopping.\n")
         break
       }
-      
+
       cat(" Found", length(estate_items), "properties\n")
-      
-      # Extract data from each property
-      for (i in 1:length(estate_items)) {
+
+      for (i in seq_along(estate_items)) {
         property <- estate_items[i]
-        
-        # Extract text content and parse it
+
         text_content <- property %>% html_text(trim = TRUE)
-        
+
         # Extract postal code and city using capture groups
         postal_code <- ""
         city <- ""
         plz_match <- regmatches(text_content, regexec("PLZ, ORT : ([0-9]{4}) ([^\n\r]+)", text_content))[[1]]
         if (length(plz_match) >= 3) {
           postal_code <- plz_match[2]
-          # Trim any trailing label text (e.g. "Kaufpreis" or similar ALL-CAPS fields)
           city <- trimws(gsub("\\s+[A-ZÜÄÖ]{2,}.*$", "", plz_match[3]))
         }
 
-        # Alternative extraction if the first method fails
         if (postal_code == "" || city == "") {
-          # Look for pattern like "6659 Camedo" or "6659 Bad Ragaz"
           alt_match <- regmatches(text_content, regexec("([0-9]{4}) ([A-Za-züäöÄÖÜ][A-Za-züäöÄÖÜ -]*[A-Za-züäöÄÖÜ])", text_content))[[1]]
           if (length(alt_match) >= 3) {
             postal_code <- alt_match[2]
             city <- alt_match[3]
           }
         }
-        
+
         # Extract price
         price_match <- regmatches(text_content, regexpr("CHF [0-9.,]+,-", text_content))
         price <- ifelse(length(price_match) > 0, price_match[1], "")
-        
+
         # Extract living area
         area_match <- regmatches(text_content, regexpr("Wohnfläche:[0-9.,]+ m²", text_content))
         living_area <- ifelse(length(area_match) > 0, area_match[1], "")
-        
+
         # Extract property link
         link_nodes <- property %>% html_elements("a")
         property_link <- ""
@@ -280,15 +315,13 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2) {
             }
           }
         }
-        
+
         # Extract and download images
         image_nodes <- property %>% html_elements("img")
         image_path <- ""
         if (length(image_nodes) > 0) {
-          # Get the first image src
           image_src <- image_nodes[1] %>% html_attr("src")
           if (!is.na(image_src)) {
-            # Make sure it's a full URL
             if (startsWith(image_src, "//")) {
               image_url <- paste0("https:", image_src)
             } else if (startsWith(image_src, "/")) {
@@ -298,15 +331,12 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2) {
             } else {
               image_url <- image_src
             }
-            
-            # Create filename based on page and position
-            # Strip query parameters before extracting extension
+
             clean_url <- sub("\\?.*$", "", image_url)
             file_extension <- tools::file_ext(basename(clean_url))
             if (file_extension == "") file_extension <- "jpg"
             filename <- paste0("property_", page_idx + 1, "_", i, ".", file_extension)
-            
-            # Download image
+
             cat("  Downloading image for property", i, "...")
             downloaded_path <- download_image(image_url, filename)
             if (!is.na(downloaded_path)) {
@@ -317,55 +347,49 @@ scrape_all_properties <- function(max_pages = 233, items_per_page = 2) {
             }
           }
         }
-        
-        # Append property record to list
-        list_idx <- list_idx + 1L
-        all_properties_list[[list_idx]] <- data.frame(
-          page = page_idx + 1,
-          position = i,
-          postal_code = postal_code,
-          city = city,
-          price = price,
-          living_area = living_area,
-          property_link = property_link,
-          image_path = image_path,
-          full_text = substr(text_content, 1, 500),
-          stringsAsFactors = FALSE
+
+        # Write row directly to database; IGNORE silently skips duplicate property_link
+        tryCatch(
+          dbExecute(con,
+            "INSERT OR IGNORE INTO properties
+             (page, position, postal_code, city, price, living_area, property_link, image_path, full_text)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            list(page_idx + 1, i, postal_code, city, price, living_area,
+                 property_link, image_path, substr(text_content, 1, 500))
+          ),
+          error = function(e) cat("  DB write error:", e$message, "\n")
         )
       }
+
+      # Mark this page as done so it is skipped on resume
+      dbExecute(con,
+        "INSERT OR REPLACE INTO scraped_pages (page_idx, items_found) VALUES (?, ?)",
+        list(page_idx, length(estate_items))
+      )
     } else {
       cat(" Failed to scrape page", page_idx + 1, "\n")
     }
-    
-    # Be respectful to the server - increased delay
+
     Sys.sleep(2)
   }
-  
-  all_properties <- bind_rows(all_properties_list[seq_len(list_idx)])
 
+  total <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties")$n
   cat("\n=== SCRAPING COMPLETE ===\n")
-  cat("Total properties scraped:", nrow(all_properties), "\n\n")
-  
-  # Display first few properties
-  if (nrow(all_properties) > 0) {
-    cat("First 5 properties:\n")
-    print(head(all_properties[, c("postal_code", "city", "price", "living_area", "image_path")], 5))
-  }
-  
-  return(all_properties)
+  cat("Total properties in database:", total, "\n")
 }
 
-# Save data to CSV file
-save_properties_to_csv <- function(properties_data, filename = "rustico_properties.csv") {
-  if (nrow(properties_data) > 0) {
-    write.csv(properties_data, filename, row.names = FALSE)
-    cat("Data saved to:", filename, "\n")
-    cat("Total properties saved:", nrow(properties_data), "\n")
-  }
+# Export the properties table from the database to a CSV file
+export_to_csv <- function(db_path = "rustico_properties.sqlite", filename = "rustico_properties.csv") {
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  properties <- dbReadTable(con, "properties")
+  write.csv(properties, filename, row.names = FALSE)
+  cat("Exported", nrow(properties), "properties to", filename, "\n")
 }
 
 # Only run when executed directly (Rscript web_scraper.R), not when sourced
 if (sys.nframe() == 0) {
-  properties_data <- scrape_all_properties(max_pages = 233, items_per_page = 2)
-  save_properties_to_csv(properties_data)
+  scrape_all_properties(max_pages = 233, items_per_page = 2)
+  export_to_csv()
 }
