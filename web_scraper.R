@@ -358,7 +358,7 @@ init_db <- function(db_path) {
 # No parsing happens here — this step only touches the website.
 # max_age_days: if set, pages scraped more than this many days ago are removed
 # from scraped_pages so they will be re-fetched on this run.
-scrape_raw <- function(max_pages = 233, items_per_page = 2,
+scrape_raw <- function(max_pages = 233, items_per_page = 10,
                        db_path = "rustico_properties.sqlite",
                        max_age_days = NULL) {
   base_url <- paste0(
@@ -510,6 +510,7 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
       } else {
         cat(" Failed\n")
       }
+      Sys.sleep(0.5)
     }
 
     tryCatch({
@@ -811,7 +812,7 @@ export_to_csv <- function(db_path = "rustico_properties.sqlite",
 
 # Only run when executed directly (Rscript web_scraper.R), not when sourced
 if (sys.nframe() == 0) {
-  scrape_raw(max_pages = 233, items_per_page = 2)
+  scrape_raw(max_pages = 233, items_per_page = 10)
   update_active_status()
   parse_and_enrich()
   apply_keywords()
