@@ -56,14 +56,14 @@ max_price  <- if (length(prices) > 0) max(prices) / 1000 else NA
 # Compute PLZ centroids for map markers
 zip_all   <- st_read("data/AMTOVZ_GDB_LV95.gdb", layer = "AMTOVZ_ZIP", quiet = TRUE)
 plzs      <- unique(active$postal_code[!is.na(active$postal_code)])
-zip_cents <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ] |>
+zip_poly <- zip_all[as.character(zip_all$ZIP4) %in% plzs, ] |>
   dplyr::mutate(postal_code = as.character(ZIP4)) |>
   dplyr::group_by(postal_code) |>
   dplyr::summarise(.groups = "drop") |>
-  st_transform(4326) |>
-  st_centroid()
+  st_transform(4326)
+zip_cents   <- st_centroid(zip_poly)
 coords      <- st_coordinates(zip_cents)
-centroid_df <- data.frame(postal_code = zip_cents$postal_code,
+centroid_df <- data.frame(postal_code = zip_poly$postal_code,
                           map_lng = coords[, 1], map_lat = coords[, 2],
                           stringsAsFactors = FALSE)
 
@@ -183,6 +183,15 @@ leaflet(shared) |>
     group = "Aerial"
   ) |>
   addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") |>
+  addPolygons(
+    data        = zip_poly,
+    group       = "PLZ",
+    color       = "#555",
+    weight      = 1,
+    fillColor   = "#aaa",
+    fillOpacity = 0.15,
+    label       = ~postal_code
+  ) |>
   addCircleMarkers(
     lng            = ~lng,
     lat            = ~lat,
@@ -195,7 +204,8 @@ leaflet(shared) |>
     clusterOptions = markerClusterOptions(maxClusterRadius = 40)
   ) |>
   addLayersControl(
-    baseGroups = c("Swisstopo Grey", "Swisstopo Colour", "Aerial", "OpenStreetMap"),
-    options    = layersControlOptions(collapsed = FALSE)
+    baseGroups   = c("Swisstopo Grey", "Swisstopo Colour", "Aerial", "OpenStreetMap"),
+    overlayGroups = "PLZ",
+    options      = layersControlOptions(collapsed = FALSE)
   )
 ```
