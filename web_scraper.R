@@ -118,9 +118,7 @@ extract_m2 <- function(x) {
 # spaced-out key/value format ("Kaufpreis:\nCHF 59.000,-\n...") by
 # normalising whitespace first, then using all known label names as
 # look-ahead anchors so each field value stops at the next label.
-parse_property_text <- function(text,
-                               blacklist   = KEYWORDS_BLACKLIST,
-                               interesting = KEYWORDS_INTERESTING) {
+parse_property_text <- function(text) {
   text <- gsub("\\s+", " ", trimws(text))
 
   labels <- c(
@@ -160,12 +158,6 @@ parse_property_text <- function(text,
   } else {
     NA_character_
   }
-
-  # Keyword matching against description + full text
-  search_text <- paste(result$description, text, sep = " ")
-  result$blacklist_keywords   <- match_keywords(search_text, blacklist)
-  result$interesting_keywords <- match_keywords(search_text, interesting)
-  result$is_blacklisted       <- as.integer(!is.na(result$blacklist_keywords))
 
   # Derive postal code and city from address field (e.g. "6658 Borgnone")
   addr <- result$address
@@ -258,8 +250,11 @@ init_db <- function(db_path) {
 # Hit the listing pages and store raw text + resolved URLs in raw_properties.
 # Resumable: pages already recorded in scraped_pages are skipped.
 # No parsing happens here — this step only touches the website.
+# max_age_days: if set, pages scraped more than this many days ago are removed
+# from scraped_pages so they will be re-fetched on this run.
 scrape_raw <- function(max_pages = 233, items_per_page = 2,
-                       db_path = "rustico_properties.sqlite") {
+                       db_path = "rustico_properties.sqlite",
+                       max_age_days = NULL) {
   base_url <- paste0(
     "https://immobiliensuche.edireal.com/tiimmobili.ch/search",
     "?sorting=MODIFICATION_DATE&estates-view=list-view&offerType=SELL",
@@ -269,6 +264,14 @@ scrape_raw <- function(max_pages = 233, items_per_page = 2,
 
   con <- init_db(db_path)
   on.exit(dbDisconnect(con), add = TRUE)
+
+  if (!is.null(max_age_days)) {
+    n_stale <- dbExecute(con,
+      "DELETE FROM scraped_pages WHERE scraped_at < datetime('now', ?)",
+      list(paste0("-", max_age_days, " days"))
+    )
+    if (n_stale > 0) cat("Cleared", n_stale, "stale pages for re-scraping\n")
+  }
 
   done_pages <- dbGetQuery(con, "SELECT page_idx FROM scraped_pages")$page_idx
 
@@ -328,8 +331,12 @@ scrape_raw <- function(max_pages = 233, items_per_page = 2,
 
         tryCatch(
           dbExecute(con,
-            "INSERT OR IGNORE INTO raw_properties (page, position, property_link, image_url, raw_text)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO raw_properties (page, position, property_link, image_url, raw_text)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(property_link) DO UPDATE SET
+               image_url  = excluded.image_url,
+               raw_text   = excluded.raw_text,
+               scraped_at = CURRENT_TIMESTAMP",
             list(page_idx + 1, i, property_link, image_url, raw_text)
           ),
           error = function(e) cat("  DB write error:", e$message, "\n")
@@ -365,7 +372,9 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
   unparsed <- dbGetQuery(con, "
     SELECT r.id, r.page, r.position, r.property_link, r.image_url, r.raw_text
     FROM raw_properties r
-    WHERE r.id NOT IN (SELECT raw_id FROM properties WHERE raw_id IS NOT NULL)
+    LEFT JOIN properties p ON p.raw_id = r.id
+    WHERE p.id IS NULL               -- never parsed
+       OR r.scraped_at > p.parsed_at -- re-scraped since last parse
     ORDER BY r.page, r.position
   ")
 
@@ -394,18 +403,19 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
       }
     }
 
-    tryCatch(
+    tryCatch({
+      # Remove stale parsed row if this is a re-scrape
+      dbExecute(con, "DELETE FROM properties WHERE raw_id = ?", list(row$id))
       dbExecute(con,
-        "INSERT OR IGNORE INTO properties
+        "INSERT INTO properties
          (raw_id, property_link,
           object_number, object_type, state, address, postal_code, city,
           purchase_price, price_chf,
           living_area, living_area_m2, plot_area, plot_area_m2,
           built_area, built_area_m2, rooms, rooms_n,
           heating, floors, floors_n, noise_level,
-          description, blacklist_keywords, interesting_keywords, is_blacklisted,
-          image_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          description, image_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         list(
           row$id, row$property_link,
           parsed$object_number, parsed$object_type, parsed$state,
@@ -417,18 +427,91 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           parsed$rooms,          parsed$rooms_n,
           parsed$heating, parsed$floors, parsed$floors_n,
           parsed$noise_level,
-          parsed$description,
-          parsed$blacklist_keywords, parsed$interesting_keywords, parsed$is_blacklisted,
-          image_path
+          parsed$description, image_path
         )
-      ),
-      error = function(e) cat("  DB write error:", e$message, "\n")
-    )
+      )
+    }, error = function(e) cat("  DB write error:", e$message, "\n"))
   }
 
   total <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties")$n
   cat("\n=== PARSING COMPLETE ===\n")
   cat("Total properties parsed:", total, "\n")
+}
+
+# ── Step 3: Apply keywords ─────────────────────────────────────────────────────
+
+# Update keyword flags on already-parsed properties. Run this any time the
+# keyword lists change — no re-scraping or re-parsing needed.
+apply_keywords <- function(db_path   = "rustico_properties.sqlite",
+                           blacklist   = KEYWORDS_BLACKLIST,
+                           interesting = KEYWORDS_INTERESTING) {
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  rows <- dbGetQuery(con, "
+    SELECT p.id, p.description, r.raw_text
+    FROM properties p
+    JOIN raw_properties r ON r.id = p.raw_id
+  ")
+
+  cat("Applying keywords to", nrow(rows), "properties...\n")
+
+  for (i in seq_len(nrow(rows))) {
+    row         <- rows[i, ]
+    search_text <- paste(row$description, row$raw_text)
+    bl_kw  <- match_keywords(search_text, blacklist)
+    int_kw <- match_keywords(search_text, interesting)
+    dbExecute(con,
+      "UPDATE properties
+       SET blacklist_keywords = ?, interesting_keywords = ?, is_blacklisted = ?
+       WHERE id = ?",
+      list(bl_kw, int_kw, as.integer(!is.na(bl_kw)), row$id)
+    )
+  }
+
+  n_bl  <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties WHERE is_blacklisted = 1")$n
+  n_int <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM properties WHERE interesting_keywords IS NOT NULL")$n
+  cat("Done.", n_bl, "blacklisted,", n_int, "flagged as interesting.\n")
+}
+
+# ── Trial run helper ───────────────────────────────────────────────────────────
+
+# Scrape n_pages pages (stored in DB; skipped if already scraped), then show
+# the parsed output for every property without writing to the properties table.
+# Use this to verify parsing before committing to a full run.
+test_parse <- function(n_pages = 1, items_per_page = 2,
+                       db_path = "rustico_properties.sqlite") {
+  scrape_raw(max_pages = n_pages, items_per_page = items_per_page, db_path = db_path)
+
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  rows <- dbGetQuery(con, paste0(
+    "SELECT * FROM raw_properties ORDER BY page, position LIMIT ",
+    n_pages * items_per_page
+  ))
+
+  cat("=== PARSE TEST (", nrow(rows), "properties) ===\n\n")
+
+  for (i in seq_len(nrow(rows))) {
+    row    <- rows[i, ]
+    parsed <- parse_property_text(row$raw_text)
+
+    cat(sprintf("--- Property %d  (page %d, pos %d) ---\n", i, row$page, row$position))
+    cat("Description :", parsed$description, "\n")
+    cat("Object      :", parsed$object_number, "|", parsed$object_type, "\n")
+    cat("Address     :", parsed$address, " ->", parsed$postal_code, parsed$city, "\n")
+    cat("Price       : CHF", parsed$price_chf, "  (raw:", parsed$purchase_price, ")\n")
+    cat("Living area :", parsed$living_area_m2, "m²  Plot:", parsed$plot_area_m2,
+        "m²  Built:", parsed$built_area_m2, "m²\n")
+    cat("Rooms       :", parsed$rooms_n, "  Floors:", parsed$floors_n, "\n")
+    cat("Heating     :", parsed$heating, "\n")
+    cat("Noise level :", parsed$noise_level, "\n")
+    cat("Link        :", row$property_link, "\n")
+    cat("\n")
+  }
+
+  invisible(rows)
 }
 
 # ── Diagnostic helpers ─────────────────────────────────────────────────────────
@@ -540,5 +623,6 @@ export_to_csv <- function(db_path = "rustico_properties.sqlite",
 if (sys.nframe() == 0) {
   scrape_raw(max_pages = 233, items_per_page = 2)
   parse_and_enrich()
+  apply_keywords()
   export_to_csv()
 }
