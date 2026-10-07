@@ -2,7 +2,6 @@
 rustico_properties.sqlite
 index_files/
 rustico_properties.csv
-images/
 
 # R
 .Renviron

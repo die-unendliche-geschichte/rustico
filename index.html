@@ -47,8 +47,131 @@
     }
     #divider:hover, #divider.dragging { background: #888; }
 
-    #map-pane { flex: 1; min-width: 0; }
+    #map-pane { flex: 1; min-width: 0; position: relative; }
     #map { height: 100%; }
+
+    /* ── Filter bar ─────────────────────────────────────────────────── */
+    #filter-bar {
+      padding: 5px 8px;
+      background: #f0f3f7;
+      border-bottom: 1px solid #ccc;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex-shrink: 0;
+      font-size: .78em;
+    }
+    .fb-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .fb-label { font-weight: 600; color: #555; min-width: 62px; }
+
+    .fb-chip {
+      padding: 2px 9px;
+      border-radius: 10px;
+      border: 1px solid #b0b8c4;
+      background: #fff;
+      cursor: pointer;
+      font-size: inherit;
+      color: #333;
+      line-height: 1.6;
+    }
+    .fb-chip:hover { background: #e8ecf1; }
+    .fb-chip.on { background: #1a2635; color: #fff; border-color: #1a2635; }
+
+    /* Gemeinde dropdown */
+    #gemeinde-picker { position: relative; }
+    #gemeinde-btn {
+      padding: 2px 9px;
+      border-radius: 10px;
+      border: 1px solid #b0b8c4;
+      background: #fff;
+      cursor: pointer;
+      font-size: inherit;
+      color: #333;
+      line-height: 1.6;
+    }
+    #gemeinde-btn.on { background: #1a2635; color: #fff; border-color: #1a2635; }
+    #gemeinde-panel {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 1000;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.15);
+      width: 220px;
+      max-height: 300px;
+      flex-direction: column;
+    }
+    #gemeinde-panel.open { display: flex; }
+    #gemeinde-search {
+      padding: 6px 10px;
+      border: none;
+      border-bottom: 1px solid #ddd;
+      font-size: .9em;
+      outline: none;
+    }
+    #gemeinde-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+    .gem-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 3px 10px;
+      cursor: pointer;
+      font-size: .9em;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .gem-item:hover { background: #f0f3f7; }
+
+    /* ── View toggle buttons ────────────────────────────────────────── */
+    /* "Karte →" button sitting right of the filter bar */
+    #btn-show-map {
+      margin-left: auto;
+      padding: 3px 10px;
+      border-radius: 10px;
+      border: 1px solid #b0b8c4;
+      background: #fff;
+      cursor: pointer;
+      font-size: inherit;
+      color: #333;
+      white-space: nowrap;
+    }
+    #btn-show-map:hover { background: #e8ecf1; }
+
+    /* "← Tabelle" floating button on the map */
+    #btn-show-table {
+      display: none;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 2px solid rgba(0,0,0,.2);
+      background: #fff;
+      cursor: pointer;
+      font-size: .82em;
+      font-weight: 600;
+      color: #333;
+      box-shadow: 0 1px 4px rgba(0,0,0,.2);
+    }
+    #btn-show-table:hover { background: #f4f4f4; }
+
+    /* ── Map popup ──────────────────────────────────────────────────── */
+    .prop-popup { width: 210px; }
+    .prop-popup img {
+      width: 100%; border-radius: 4px; display: block; margin-bottom: 6px;
+    }
+    .prop-popup .pop-title { font-weight: 600; font-size: .88em; line-height: 1.3; }
+    .prop-popup .pop-price { color: #555; font-size: .82em; margin: 3px 0 5px; }
+    .prop-popup a { font-size: .82em; }
   </style>
 </head>
 <body>
@@ -60,11 +183,29 @@
 
 <div id="app">
   <div id="table-pane">
+    <div id="filter-bar">
+      <div class="fb-row">
+        <span class="fb-label">Bezirk</span>
+        <div id="bezirk-chips" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+      </div>
+      <div class="fb-row">
+        <span class="fb-label">Gemeinde</span>
+        <div id="gemeinde-picker">
+          <button id="gemeinde-btn">Alle ▾</button>
+          <div id="gemeinde-panel">
+            <input type="search" id="gemeinde-search" placeholder="Suchen…">
+            <div id="gemeinde-list"></div>
+          </div>
+        </div>
+        <button id="btn-show-map">Karte →</button>
+      </div>
+    </div>
     <div id="grid" class="ag-theme-alpine"></div>
   </div>
   <div id="divider"></div>
   <div id="map-pane">
     <div id="map"></div>
+    <button id="btn-show-table">← Tabelle</button>
   </div>
 </div>
 
@@ -88,11 +229,30 @@ function fmtCHF(v) {
   return v != null ? 'CHF\u202f' + Math.round(v / 1000) + 'k' : '';
 }
 
+// ── View toggle (table ↔ map) ─────────────────────────────────────────────────
+
+const tablePane    = document.getElementById('table-pane');
+const mapPane      = document.getElementById('map-pane');
+const divider      = document.getElementById('divider');
+const btnShowMap   = document.getElementById('btn-show-map');
+const btnShowTable = document.getElementById('btn-show-table');
+
+btnShowMap.addEventListener('click', () => {
+  tablePane.style.display = 'none';
+  divider.style.display   = 'none';
+  btnShowTable.style.display = 'block';
+  setTimeout(() => map.invalidateSize(), 10);
+});
+
+btnShowTable.addEventListener('click', () => {
+  tablePane.style.display = '';
+  divider.style.display   = '';
+  btnShowTable.style.display = 'none';
+});
+
 // ── Resizable divider ─────────────────────────────────────────────────────────
 
 (function () {
-  const divider  = document.getElementById('divider');
-  const tablePane = document.getElementById('table-pane');
   let dragging = false, startX = 0, startW = 0;
 
   divider.addEventListener('mousedown', e => {
@@ -155,20 +315,20 @@ const markerById = new Map();
 PROPERTIES.forEach(p => {
   if (p.lat == null || p.lon == null) return;
 
-  const details = [
-    p.price_chf      != null ? fmtCHF(p.price_chf)               : null,
-    p.rooms_n        != null ? p.rooms_n + ' Zimmer'              : null,
-    p.living_area_m2 != null ? p.living_area_m2 + '\u202fm\u00b2' : null,
-    p.condition      != null ? p.condition                        : null,
-  ].filter(Boolean).join(' · ');
+  const slug  = (p.property_link ?? '').split('/').pop().split('?')[0];
+  const title = titleFromLink(p.property_link);
+  const price = p.price_chf != null ? fmtCHF(p.price_chf) : '';
 
-  const popup = `<b>${p.postal_code ?? ''} ${p.city ?? ''}</b><br>
-${details}<br>
-<a href="${p.property_link}" target="_blank">Inserat öffnen →</a>`;
+  const popup = `<div class="prop-popup">
+<img src="images/${slug}.jpg" onerror="this.style.display='none'">
+<div class="pop-title">${title}</div>
+${price ? `<div class="pop-price">${price}</div>` : ''}
+<a href="${p.property_link}" target="_blank">Inserat öffnen →</a>
+</div>`;
 
   const m = L.circleMarker([p.lat, p.lon], {
     radius: 9, color: '#333', weight: 2, fillColor: '#e05c1a', fillOpacity: 0.9,
-  }).bindPopup(popup);
+  }).bindPopup(popup, { maxWidth: 230 });
 
   markerById.set(p.id, m);
   cluster.addLayer(m);
@@ -182,6 +342,82 @@ function syncMapToIds(visibleIds) {
     if (visibleIds.has(id)) cluster.addLayer(m);
   }
 }
+
+// ── External filters (Bezirk / Gemeinde) ─────────────────────────────────────
+
+const selBezirke   = new Set();
+const selGemeinden = new Set();
+
+const BEZIRKE   = [...new Set(PROPERTIES.map(p => p.bezirk).filter(Boolean))].sort();
+const GEMEINDEN = [...new Set(PROPERTIES.map(p => p.gemeinde).filter(Boolean))].sort();
+
+// Bezirk chips
+BEZIRKE.forEach(b => {
+  const btn = document.createElement('button');
+  btn.className = 'fb-chip';
+  btn.textContent = b;
+  btn.addEventListener('click', () => {
+    if (selBezirke.has(b)) selBezirke.delete(b);
+    else selBezirke.add(b);
+    btn.classList.toggle('on', selBezirke.has(b));
+    gridApi.onFilterChanged();
+  });
+  document.getElementById('bezirk-chips').appendChild(btn);
+});
+
+// Gemeinde searchable dropdown
+const gemBtn    = document.getElementById('gemeinde-btn');
+const gemPanel  = document.getElementById('gemeinde-panel');
+const gemSearch = document.getElementById('gemeinde-search');
+const gemList   = document.getElementById('gemeinde-list');
+
+function buildGemList(query = '') {
+  const q = query.toLowerCase();
+  gemList.innerHTML = '';
+  GEMEINDEN.filter(g => g.toLowerCase().includes(q)).forEach(g => {
+    const lbl = document.createElement('label');
+    lbl.className = 'gem-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = selGemeinden.has(g);
+    cb.addEventListener('change', () => {
+      if (cb.checked) selGemeinden.add(g);
+      else selGemeinden.delete(g);
+      updateGemBtn();
+      gridApi.onFilterChanged();
+    });
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(g));
+    gemList.appendChild(lbl);
+  });
+}
+
+function updateGemBtn() {
+  if (selGemeinden.size === 0) {
+    gemBtn.textContent = 'Alle ▾';
+    gemBtn.classList.remove('on');
+  } else {
+    gemBtn.textContent = `${selGemeinden.size} ausgewählt ▾`;
+    gemBtn.classList.add('on');
+  }
+}
+
+gemBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  gemPanel.classList.toggle('open');
+  if (gemPanel.classList.contains('open')) {
+    buildGemList(gemSearch.value);
+    gemSearch.focus();
+  }
+});
+
+gemSearch.addEventListener('input', () => buildGemList(gemSearch.value));
+
+document.addEventListener('click', e => {
+  if (!document.getElementById('gemeinde-picker').contains(e.target)) {
+    gemPanel.classList.remove('open');
+  }
+});
 
 // ── Grid ─────────────────────────────────────────────────────────────────────
 
@@ -213,15 +449,15 @@ const colDefs = [
   },
   { field: 'living_area_m2', headerName: 'Wohn m²',  width: 88,  filter: 'agNumberColumnFilter' },
   { field: 'plot_area_m2',   headerName: 'Grund m²', width: 88,  filter: 'agNumberColumnFilter' },
-  { field: 'gemeinde', headerName: 'Gemeinde', width: 130, filter: 'agTextColumnFilter' },
-  { field: 'bezirk',   headerName: 'Bezirk',   width: 130, filter: 'agTextColumnFilter' },
+  { field: 'gemeinde', headerName: 'Gemeinde', width: 130, floatingFilter: false },
+  { field: 'bezirk',   headerName: 'Bezirk',   width: 130, floatingFilter: false },
 ];
 
-// ── Grid ─────────────────────────────────────────────────────────────────────
+// ── Grid init ─────────────────────────────────────────────────────────────────
 
 const countEl = document.getElementById('count');
 
-agGrid.createGrid(document.getElementById('grid'), {
+const gridApi = agGrid.createGrid(document.getElementById('grid'), {
   columnDefs: colDefs,
   rowData: PROPERTIES,
   defaultColDef: {
@@ -229,10 +465,19 @@ agGrid.createGrid(document.getElementById('grid'), {
     resizable:      true,
     floatingFilter: true,
   },
-  rowHeight:            50,
-  headerHeight:         36,
+  rowHeight:             50,
+  headerHeight:          36,
   floatingFiltersHeight: 32,
-  suppressCellFocus:    true,
+  suppressCellFocus:     true,
+  isExternalFilterPresent() {
+    return selBezirke.size > 0 || selGemeinden.size > 0;
+  },
+  doesExternalFilterPass(node) {
+    const { gemeinde, bezirk } = node.data;
+    if (selBezirke.size > 0   && !selBezirke.has(bezirk))     return false;
+    if (selGemeinden.size > 0 && !selGemeinden.has(gemeinde)) return false;
+    return true;
+  },
   getRowStyle(p) {
     if (p.data.blacklist_keywords)   return { background: '#fff0f0' };
     if (p.data.interesting_keywords) return { background: '#f0faf0' };
