@@ -279,6 +279,60 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 ## TODOs
 
 - **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view.
+- **Parcel polygon overlay** — listings often include a screenshot of the cantonal cadastral map showing the parcel boundary. Pipeline:
+  1. Identify which scraped image(s) show a cadastral/parcel map screenshot (vs. photos of the building) — requires a capable vision model, preferably local (e.g. LLaVA, Qwen-VL, or similar).
+  2. Extract the parcel number from that image via OCR/vision inference.
+  3. Resolve commune name + parcel number → EGRID + polygon via the swisstopo API (see below).
+  4. Overlay the polygon on the Leaflet map per listing.
+
+---
+
+## Swiss cadastral parcel API
+
+All calls are free, no authentication required.
+
+### Commune name + parcel number → EGRID + feature ID
+
+```
+GET https://api3.geo.admin.ch/rest/services/ech/SearchServer
+    ?searchText={commune}+{parcel_number}&type=locations&origins=parcel
+```
+
+Example: `searchText=Aranno+357`
+
+Returns (relevant fields from `results[0].attrs`):
+
+| Field | Example | Notes |
+|---|---|---|
+| `detail` | `357 aranno 5143 ch130292077506` | commune, BFS nr, EGRID |
+| `egris_egrid` | `CH130292077506` | national parcel identifier |
+| `id` | `1575559` | internal feature ID, used in step 2 |
+| `lat` / `lon` | `46.0117 / 8.8735` | centroid in WGS84 |
+| `geom_st_box2d` | `BOX(711094 96542, ...)` | bbox in LV95 |
+
+If the commune name is ambiguous, filter by BFS number in the `detail` string (format: `{parcel} {commune} {bfs_nr} {egrid}`).
+
+### Feature ID → parcel polygon (WGS84)
+
+```
+GET https://api3.geo.admin.ch/rest/services/all/MapServer/
+    ch.swisstopo-vd.amtliche-vermessung/{feature_id}
+    ?returnGeometry=true&sr=4326
+```
+
+Returns a polygon ring as `feature.geometry.rings[0]` — array of `[lon, lat]` pairs, ready for Leaflet/GeoJSON.
+
+### BFS Gemeindenummer → commune name (optional)
+
+Only needed if you have the BFS number but not the name:
+
+```
+GET https://api3.geo.admin.ch/rest/services/all/MapServer/
+    ch.swisstopo.swissboundaries3d-gemeinde-flaeche.fill/{bfs_nr}
+    ?returnGeometry=false
+```
+
+Returns `feature.attributes.gemname`.
 
 ---
 
