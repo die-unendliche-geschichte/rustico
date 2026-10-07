@@ -279,8 +279,6 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 ## TODOs
 
 - **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view.
-- **Checkbox filter for Gemeinde / Bezirk** — replace the text column filter with a proper multi-select checkbox dropdown. AG Grid Community doesn't have `agSetColumnFilter` (Enterprise only); needs a custom external filter implementation.
-- **Mobile-friendly layout** — the current split-pane design doesn't work on small screens. Needs a responsive layout (e.g. stacked table/map with a toggle, or a drawer).
 
 ---
 
