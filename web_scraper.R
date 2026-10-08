@@ -131,6 +131,57 @@ extract_km <- function(x) {
   if (length(m) == 0) NA_real_ else as.numeric(gsub(",", ".", m))
 }
 
+# Normalise Zustand to canonical condition categories
+normalize_condition <- function(x) {
+  if (is.na(x) || !nzchar(trimws(x))) return(NA_character_)
+  v <- trimws(tolower(x))
+  if (grepl("^sehr gut",                                        v)) return("sehr gut")
+  if (grepl("^gut",                                             v)) return("gut")
+  if (grepl("^(bewohnbar|teilweise bewohnt)",                   v)) return("bewohnbar")
+  if (grepl("renovier|renovationsbed|innenrenovation",          v)) return("renovierungsbed\u00fcrftig")
+  if (grepl("^(zum ausbauen|auszubauen|totaler|vollst\u00e4ndiger innenausbau)", v)) return("auszubauen")
+  if (grepl("^(unbenutzbar|schlecht)",                          v)) return("schlecht")
+  NA_character_
+}
+
+# Normalise Lärmbelastung, stripping garbage that got appended after the real value
+normalize_noise_level <- function(x) {
+  if (is.na(x) || !nzchar(trimws(x))) return(NA_character_)
+  v <- trimws(tolower(x))
+  if (grepl("^absolute ruhelage",       v)) return("absolute Ruhelage")
+  if (grepl("^geringe",                 v)) return("geringe Beeintr\u00e4chtigung")
+  if (grepl("^durchschnittliche",       v)) return("durchschnittliche Beeintr\u00e4chtigung")
+  if (grepl("^beeintr\u00e4chtigung gegeben", v)) return("Beeintr\u00e4chtigung gegeben")
+  NA_character_
+}
+
+# Normalise Keller to "ja" / "nein" / "teilweise"
+normalize_basement <- function(x) {
+  if (is.na(x) || !nzchar(trimws(x))) return(NA_character_)
+  v <- trimws(tolower(x))
+  if (grepl("^nein",                        v)) return("nein")
+  if (grepl("^teil",                        v)) return("teilweise")
+  if (grepl("^(ja|[0-9]|voll|ca\\.|diverse)", v)) return("ja")
+  NA_character_
+}
+
+# Normalise Wasser to "ja" / NA  (field is nearly always NULL; non-null values start with "ja")
+normalize_wasser <- function(x) {
+  if (is.na(x) || !nzchar(trimws(x))) return(NA_character_)
+  if (grepl("^ja", trimws(tolower(x)))) return("ja")
+  NA_character_
+}
+
+# Normalise Zweitwohnsitz raw text to "ja" / "nein" / "abzuklären" / NA
+normalize_secondary_home <- function(x) {
+  if (is.na(x) || !nzchar(trimws(x))) return(NA_character_)
+  v <- trimws(tolower(x))
+  if (grepl("^nein|^nur erstwohnsitz", v, perl = TRUE))               return("nein")
+  if (grepl("^(ja|m\u00f6glich)", v, perl = TRUE))                    return("ja")
+  if (grepl("abzu|abkl|^zu (pr|kl)|offen|eventuell", v, perl = TRUE)) return("abzukl\u00e4ren")
+  NA_character_
+}
+
 # Extract distance in metres: converts km if found, otherwise parses bare metre value
 extract_metres <- function(x) {
   if (is.null(x) || is.na(x) || !nzchar(x)) return(NA_real_)
@@ -154,7 +205,8 @@ parse_property_text <- function(text) {
   text <- gsub("\u00a0", " ", text)   # non-breaking space → regular space
 
   # Truncate at Italian section (detail pages are bilingual; keep German only)
-  text <- sub("(?si)\\s*Ubicazione.*$", "", text, perl = TRUE)
+  # Sites use either "Ubicazione" or "Posizione | Dintorni" as the Italian header
+  text <- sub("(?si)\\s*(?:Ubicazione|Posizione\\s*\\|\\s*Dintorni).*$", "", text, perl = TRUE)
 
   # ── Split on newlines to separate the inline summary (line 1) ───────────────
   lines <- trimws(strsplit(text, "\n")[[1]])
@@ -165,7 +217,7 @@ parse_property_text <- function(text) {
   postal_code <- NA_character_
   city        <- NA_character_
   header <- sub("(?i)(?:Kaufpreis|Wohnfl\u00e4che|Nutzfl\u00e4che).*$", "", first_line, perl = TRUE)
-  plz_m  <- regmatches(header, regexec("PLZ, ORT\u00a0?:\u00a0?([0-9]{4})[\u00a0 ](.+)$", trimws(header)))[[1]]
+  plz_m  <- regmatches(header, regexec("PLZ, ORT\\s*:\\s*([0-9]{4})\\s+(.+)$", trimws(header)))[[1]]
   if (length(plz_m) >= 3) {
     postal_code <- trimws(plz_m[2])
     city        <- trimws(plz_m[3])
@@ -237,7 +289,7 @@ parse_property_text <- function(text) {
     garden             = "Garten(?:fl\u00e4che|sitzplatz)?",
     balcony            = "Balkon(?:fl\u00e4che|e)?",
     terrace            = "Terrassen?(?:fl\u00e4che)?",
-    ortschaft          = "Ort(?:schaft)?"
+    ortschaft          = "\\bOrt(?:schaft)?\\b"
   )
 
   all_labels_pat <- paste(labels, collapse = "|")
@@ -304,6 +356,11 @@ parse_property_text <- function(text) {
   result$public_transport_m <- extract_metres(result$public_transport)
   result$dist_highway_km  <- extract_km(result$dist_highway)
   result$dist_city_km     <- extract_km(result$dist_city)
+  result$secondary_home_yn <- normalize_secondary_home(result$secondary_home)
+  result$condition_cat     <- normalize_condition(result$condition)
+  result$noise_level_cat   <- normalize_noise_level(result$noise_level)
+  result$basement_yn       <- normalize_basement(result$basement)
+  result$wasser_yn         <- normalize_wasser(result$wasser)
 
   as.data.frame(result, stringsAsFactors = FALSE)
 }
@@ -367,13 +424,17 @@ init_db <- function(db_path) {
       floors         TEXT,
       floors_n       REAL,
       noise_level          TEXT,
+      noise_level_cat      TEXT,
       region               TEXT,
       condition            TEXT,
+      condition_cat        TEXT,
       lage                 TEXT,
       ausblick             TEXT,
       bathrooms            TEXT,
       basement             TEXT,
+      basement_yn          TEXT,
       secondary_home       TEXT,
+      secondary_home_yn    TEXT,
       parking              TEXT,
       description          TEXT,
       blacklist_keywords   TEXT,
@@ -399,10 +460,13 @@ init_db <- function(db_path) {
       dist_city            TEXT,
       dist_city_km         REAL,
       wasser               TEXT,
+      wasser_yn            TEXT,
       kanalisation         TEXT,
       garden               TEXT,
       balcony              TEXT,
       terrace              TEXT,
+      gemeinde             TEXT,
+      bezirk               TEXT,
       parsed_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   ")
@@ -410,8 +474,10 @@ init_db <- function(db_path) {
   # Migrate existing properties tables
   existing_prop_cols <- dbListFields(con, "properties")
   new_prop_cols <- list(
-    region = "TEXT", condition = "TEXT", lage = "TEXT", ausblick = "TEXT",
-    bathrooms = "TEXT", basement = "TEXT", secondary_home = "TEXT", parking = "TEXT",
+    noise_level_cat = "TEXT", region = "TEXT", condition = "TEXT", condition_cat = "TEXT",
+    lage = "TEXT", ausblick = "TEXT",
+    bathrooms = "TEXT", basement = "TEXT", basement_yn = "TEXT",
+    secondary_home = "TEXT", secondary_home_yn = "TEXT", parking = "TEXT",
     lat = "REAL", lon = "REAL",
     wc = "TEXT", wc_n = "REAL", baeder = "TEXT", bathrooms_n = "REAL",
     build_year = "TEXT", build_year_n = "INTEGER",
@@ -420,8 +486,10 @@ init_db <- function(db_path) {
     public_connections = "TEXT",
     dist_highway = "TEXT", dist_highway_km = "REAL",
     dist_city = "TEXT", dist_city_km = "REAL",
-    wasser = "TEXT", kanalisation = "TEXT",
-    garden = "TEXT", balcony = "TEXT", terrace = "TEXT"
+    wasser = "TEXT", wasser_yn = "TEXT", kanalisation = "TEXT",
+    garden = "TEXT", balcony = "TEXT", terrace = "TEXT",
+    gemeinde = "TEXT", bezirk = "TEXT",
+    lat_precise = "REAL", lon_precise = "REAL"
   )
   for (col in names(new_prop_cols)) {
     if (!col %in% existing_prop_cols)
@@ -630,15 +698,15 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           purchase_price, price_chf,
           living_area, living_area_m2, plot_area, plot_area_m2,
           built_area, built_area_m2, rooms, rooms_n,
-          heating, floors, floors_n, noise_level,
-          region, condition, lage, ausblick,
-          bathrooms, basement, secondary_home, parking,
+          heating, floors, floors_n, noise_level, noise_level_cat,
+          region, condition, condition_cat, lage, ausblick,
+          bathrooms, basement, basement_yn, secondary_home, secondary_home_yn, parking,
           wc, wc_n, baeder, bathrooms_n,
           build_year, build_year_n, renovation,
           shopping, schools,
           public_transport, public_transport_m, public_connections,
           dist_highway, dist_highway_km, dist_city, dist_city_km,
-          wasser, kanalisation, garden, balcony, terrace,
+          wasser, wasser_yn, kanalisation, garden, balcony, terrace,
           description, image_path)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         list(
@@ -651,15 +719,15 @@ parse_and_enrich <- function(db_path = "rustico_properties.sqlite") {
           parsed$built_area,     parsed$built_area_m2,
           parsed$rooms,          parsed$rooms_n,
           parsed$heating, parsed$floors, parsed$floors_n,
-          parsed$noise_level,
-          parsed$region, parsed$condition, parsed$lage, parsed$ausblick,
-          parsed$bathrooms, parsed$basement, parsed$secondary_home, parsed$parking,
+          parsed$noise_level, parsed$noise_level_cat,
+          parsed$region, parsed$condition, parsed$condition_cat, parsed$lage, parsed$ausblick,
+          parsed$bathrooms, parsed$basement, parsed$basement_yn, parsed$secondary_home, parsed$secondary_home_yn, parsed$parking,
           parsed$wc, parsed$wc_n, parsed$baeder, parsed$bathrooms_n,
           parsed$build_year, parsed$build_year_n, parsed$renovation,
           parsed$shopping, parsed$schools,
           parsed$public_transport, parsed$public_transport_m, parsed$public_connections,
           parsed$dist_highway, parsed$dist_highway_km, parsed$dist_city, parsed$dist_city_km,
-          parsed$wasser, parsed$kanalisation, parsed$garden, parsed$balcony, parsed$terrace,
+          parsed$wasser, parsed$wasser_yn, parsed$kanalisation, parsed$garden, parsed$balcony, parsed$terrace,
           parsed$description, image_path
         )
       )
@@ -718,7 +786,7 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
     # The card's "PLZ, ORT : XXXX City" is reliable; ortschaft can accidentally
     # capture the broker's city (different Swiss region, different first digit).
     card_m <- regmatches(row$raw_text,
-                         regexec("PLZ, ORT\u00a0?:\u00a0?([0-9]{4})", row$raw_text))[[1]]
+                         regexec("PLZ, ORT[ \u00a0]*:[ \u00a0]*([0-9]{4})", row$raw_text))[[1]]
     card_plz <- if (length(card_m) >= 2) card_m[2] else NA_character_
     if (!is.na(parsed$postal_code) && !is.na(card_plz) &&
         substr(parsed$postal_code, 1, 1) != substr(card_plz, 1, 1)) {
@@ -748,13 +816,17 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
         floors_n           = COALESCE(?, floors_n),
         heating            = COALESCE(?, heating),
         noise_level        = COALESCE(?, noise_level),
+        noise_level_cat    = COALESCE(?, noise_level_cat),
         region             = COALESCE(?, region),
         condition          = COALESCE(?, condition),
+        condition_cat      = COALESCE(?, condition_cat),
         lage               = COALESCE(?, lage),
         ausblick           = COALESCE(?, ausblick),
         bathrooms          = COALESCE(?, bathrooms),
         basement           = COALESCE(?, basement),
+        basement_yn        = COALESCE(?, basement_yn),
         secondary_home     = COALESCE(?, secondary_home),
+        secondary_home_yn  = COALESCE(?, secondary_home_yn),
         parking            = COALESCE(?, parking),
         wc                 = COALESCE(?, wc),
         wc_n               = COALESCE(?, wc_n),
@@ -773,6 +845,7 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
         dist_city          = COALESCE(?, dist_city),
         dist_city_km       = COALESCE(?, dist_city_km),
         wasser             = COALESCE(?, wasser),
+        wasser_yn          = COALESCE(?, wasser_yn),
         kanalisation       = COALESCE(?, kanalisation),
         garden             = COALESCE(?, garden),
         balcony            = COALESCE(?, balcony),
@@ -787,11 +860,11 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
         parsed$plot_area,      parsed$plot_area_m2,
         parsed$rooms,          parsed$rooms_n,
         parsed$floors,         parsed$floors_n,
-        parsed$heating,        parsed$noise_level,
-        parsed$region,         parsed$condition,
+        parsed$heating,        parsed$noise_level, parsed$noise_level_cat,
+        parsed$region,         parsed$condition,   parsed$condition_cat,
         parsed$lage,           parsed$ausblick,
-        parsed$bathrooms,      parsed$basement,
-        parsed$secondary_home, parsed$parking,
+        parsed$bathrooms,      parsed$basement,      parsed$basement_yn,
+        parsed$secondary_home, parsed$secondary_home_yn, parsed$parking,
         parsed$wc,             parsed$wc_n,
         parsed$baeder,         parsed$bathrooms_n,
         parsed$build_year,     parsed$build_year_n,
@@ -801,7 +874,7 @@ parse_detail_pages <- function(db_path = "rustico_properties.sqlite") {
         parsed$public_connections,
         parsed$dist_highway,   parsed$dist_highway_km,
         parsed$dist_city,      parsed$dist_city_km,
-        parsed$wasser,         parsed$kanalisation,
+        parsed$wasser, parsed$wasser_yn, parsed$kanalisation,
         parsed$garden,         parsed$balcony,
         parsed$terrace,
         detail_description,
@@ -1119,6 +1192,160 @@ geolocate <- function(db_path  = "rustico_properties.sqlite",
   cat("Geolocated", n_ok, "of", nrow(props), "properties\n")
 }
 
+# ── Gemeinde / Bezirk enrichment ───────────────────────────────────────────────
+
+# Spatial join: PLZ centroid → Gemeinde polygon → write gemeinde + bezirk back
+# to the properties table.  Needs swissBOUNDARIES3D .gpkg and AMTOVZ .gdb.
+# Safe to re-run: overwrites gemeinde/bezirk for all properties.
+enrich_gemeinde_bezirk <- function(
+    db_path   = "rustico_properties.sqlite",
+    gpkg_path = "data/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg",
+    gdb_path  = "data/AMTOVZ_GDB_LV95.gdb"
+) {
+  if (!requireNamespace("sf", quietly = TRUE)) stop("install.packages('sf')")
+  if (!file.exists(gpkg_path)) stop("swissBOUNDARIES3D .gpkg not found: ", gpkg_path)
+
+  # ── Gemeinde polygons (LV95) ────────────────────────────────────────────────
+  cat("Loading Gemeinde polygons…\n")
+  gemeinden_all <- sf::st_read(gpkg_path, layer = "tlm_hoheitsgebiet", quiet = TRUE)
+  gemeinden     <- gemeinden_all[gemeinden_all$objektart == "Gemeindegebiet",
+                                  c("name", "bezirksnummer")]
+
+  cat("Loading Bezirk names…\n")
+  bezirke    <- sf::st_read(gpkg_path, layer = "tlm_bezirksgebiet", quiet = TRUE)
+  bezirk_map <- setNames(bezirke$name, as.character(bezirke$bezirksnummer))
+
+  # ── PLZ centroids from AMTOVZ (LV95) ────────────────────────────────────────
+  cat("Building PLZ centroids…\n")
+  localities <- sf::st_read(gdb_path, layer = "AMTOVZ_LOCALITY", quiet = TRUE)
+  localities <- sf::st_centroid(sf::st_transform(localities, 2056))
+
+  zips_df    <- as.data.frame(sf::st_read(gdb_path, layer = "AMTOVZ_ZIP", quiet = TRUE)
+                               )[, c("ZIP4", "FK_LOCALITY")]
+
+  loc_geom  <- setNames(sf::st_geometry(localities), as.character(localities$LOCALITYID))
+  zips_df$geometry <- loc_geom[as.character(zips_df$FK_LOCALITY)]
+  zips_df   <- zips_df[!vapply(zips_df$geometry, is.null, logical(1)), ]
+  zips_df   <- zips_df[!duplicated(zips_df$ZIP4), ]
+  plz_pts   <- sf::st_sf(zips_df, crs = 2056)
+
+  # ── Spatial join ─────────────────────────────────────────────────────────────
+  cat(sprintf("Joining %d PLZ centroids to Gemeinden…\n", nrow(plz_pts)))
+  joined <- sf::st_join(plz_pts, gemeinden, join = sf::st_within)
+
+  # Fallback: nearest Gemeinde for any PLZ that fell on a boundary
+  missed <- is.na(joined$name)
+  if (any(missed)) {
+    cat(sprintf("Nearest-feature fallback for %d PLZ…\n", sum(missed)))
+    idx <- sf::st_nearest_feature(plz_pts[missed, ], gemeinden)
+    joined$name[missed]          <- gemeinden$name[idx]
+    joined$bezirksnummer[missed] <- gemeinden$bezirksnummer[idx]
+  }
+
+  plz_lookup <- setNames(
+    lapply(seq_len(nrow(joined)), function(i) {
+      bnr    <- as.character(joined$bezirksnummer[i])
+      list(gemeinde = joined$name[i],
+           bezirk   = if (!is.na(bnr)) bezirk_map[[bnr]] else NA_character_)
+    }),
+    as.character(joined$ZIP4)
+  )
+
+  # ── Write to SQLite ──────────────────────────────────────────────────────────
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+
+  existing <- dbListFields(con, "properties")
+  if (!"gemeinde" %in% existing) dbExecute(con, "ALTER TABLE properties ADD COLUMN gemeinde TEXT")
+  if (!"bezirk"   %in% existing) dbExecute(con, "ALTER TABLE properties ADD COLUMN bezirk   TEXT")
+
+  props <- dbGetQuery(con, "SELECT id, postal_code FROM properties WHERE postal_code IS NOT NULL")
+  n_ok  <- 0L
+  for (i in seq_len(nrow(props))) {
+    info <- plz_lookup[[as.character(props$postal_code[i])]]
+    if (!is.null(info)) {
+      dbExecute(con, "UPDATE properties SET gemeinde = ?, bezirk = ? WHERE id = ?",
+                list(info$gemeinde, info$bezirk, props$id[i]))
+      if (!is.na(info$gemeinde)) n_ok <- n_ok + 1L
+    }
+  }
+  cat(sprintf("Enriched %d/%d properties with Gemeinde/Bezirk.\n", n_ok, nrow(props)))
+}
+
+# ── Precise geolocation ────────────────────────────────────────────────────────
+
+# Manually set a precise location for a single listing.
+#
+# listing_id  — any of:
+#     • the 10-digit numeric ID from the listing URL  (e.g. "1003733924")
+#     • the full listing URL
+#     • the integer database id
+# easting / northing  — Swiss coordinates in either LV95 (easting ~2.6M–2.8M)
+#     or LV03 (easting ~480K–840K).  The system is auto-detected from magnitude.
+#
+# Calls the swisstopo free reframe REST API to convert to WGS84 and writes
+# lat_precise / lon_precise into the properties table.  Run export_for_web()
+# afterwards to push the update to the dashboard.
+#
+# Example:
+#   set_precise_location("1003733924", 719738.875, 140367.281)
+#   set_precise_location("1003721211", 2719964.64, 1142660.87)
+set_precise_location <- function(listing_id, easting, northing,
+                                  db_path = "rustico_properties.sqlite") {
+  if (!requireNamespace("sf", quietly = TRUE))
+    stop("Package 'sf' is required: install.packages('sf')")
+
+  # ── Ensure columns exist ────────────────────────────────────────────────────
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE)
+  existing <- dbListFields(con, "properties")
+  if (!"lat_precise" %in% existing)
+    dbExecute(con, "ALTER TABLE properties ADD COLUMN lat_precise REAL")
+  if (!"lon_precise" %in% existing)
+    dbExecute(con, "ALTER TABLE properties ADD COLUMN lon_precise REAL")
+
+  # ── Resolve listing → database id ──────────────────────────────────────────
+
+  id_str <- as.character(listing_id)
+
+  if (grepl("^[0-9]+$", id_str) && nchar(id_str) <= 6) {
+    # Short integer → treat as DB primary key
+    row <- dbGetQuery(con, "SELECT id, property_link FROM properties WHERE id = ?",
+                      list(as.integer(id_str)))
+  } else {
+    # URL or 10-digit listing ID — match against property_link
+    numeric_part <- regmatches(id_str, regexpr("[0-9]{7,}", id_str))
+    if (length(numeric_part) == 0)
+      stop("Cannot parse listing ID: ", id_str)
+    row <- dbGetQuery(con,
+      "SELECT id, property_link FROM properties WHERE property_link LIKE ?",
+      list(paste0("%", numeric_part, "%")))
+  }
+
+  if (nrow(row) == 0) stop("No property found for: ", listing_id)
+  if (nrow(row) > 1) stop("Multiple properties matched: ", paste(row$id, collapse = ", "))
+  prop_id <- row$id[1]
+
+  # ── Convert coordinates to WGS84 via sf ────────────────────────────────────
+  # Auto-detect LV95 (easting > 1e6, EPSG:2056) vs LV03 (EPSG:21781)
+  crs_in <- if (easting > 1e6) 2056 else 21781
+  pt_wgs <- sf::st_transform(
+    sf::st_sfc(sf::st_point(c(easting, northing)), crs = crs_in), 4326
+  )
+  wgs_lon <- sf::st_coordinates(pt_wgs)[1, "X"]
+  wgs_lat <- sf::st_coordinates(pt_wgs)[1, "Y"]
+
+  # ── Write to DB ─────────────────────────────────────────────────────────────
+  dbExecute(con,
+    "UPDATE properties SET lat_precise = ?, lon_precise = ? WHERE id = ?",
+    list(wgs_lat, wgs_lon, prop_id))
+
+  cat(sprintf("Set precise location for property %d (%s):\n  %s -> lat=%.6f, lon=%.6f\n",
+              prop_id, numeric_part,
+              if (crs_in == 2056) "LV95" else "LV03",
+              wgs_lat, wgs_lon))
+}
+
 # ── Export ─────────────────────────────────────────────────────────────────────
 
 export_to_csv <- function(db_path = "rustico_properties.sqlite",
@@ -1146,12 +1373,17 @@ export_for_web <- function(db_path  = "rustico_properties.sqlite",
     SELECT p.id, p.postal_code, p.city, p.region,
            p.price_chf, p.living_area_m2, p.plot_area_m2,
            p.rooms_n, p.wc_n, p.bathrooms_n, p.floors_n,
-           p.build_year_n, p.condition, p.secondary_home, p.parking,
+           p.build_year_n, p.condition, p.condition_cat,
+           p.secondary_home, p.secondary_home_yn, p.parking,
+           p.noise_level_cat, p.basement_yn, p.wasser_yn,
+           p.gemeinde, p.bezirk,
            p.lage, p.ausblick,
            p.public_transport_m, p.dist_highway_km, p.dist_city_km,
            p.schools, p.garden,
            p.interesting_keywords, p.blacklist_keywords,
-           p.lat, p.lon,
+           COALESCE(p.lat_precise, p.lat) AS lat,
+           COALESCE(p.lon_precise, p.lon) AS lon,
+           CASE WHEN p.lat_precise IS NOT NULL THEN 1 ELSE 0 END AS location_precise,
            r.property_link
     FROM properties p
     JOIN raw_properties r ON r.id = p.raw_id
@@ -1188,6 +1420,7 @@ if (sys.nframe() == 0) {
   scrape_detail_pages()
   apply_keywords()
   geolocate()
+  enrich_gemeinde_bezirk()
   export_to_csv()
   export_for_web()
 }

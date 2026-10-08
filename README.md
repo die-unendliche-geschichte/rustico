@@ -21,31 +21,20 @@ install.packages(c("DT", "crosstalk", "leaflet", "sf"))
 
 ## Pipeline overview
 
-The workflow is split into four independent steps. Each step can be re-run in
-isolation without repeating the others.
+Each step is independent and resumable — already-done work is skipped.
+See `run.R` for a commented menu of all steps.
 
 ```
-scrape_raw()          — fetch listing pages, store raw text (network-heavy)
-    |
-update_active_status() — mark properties no longer on the site as inactive
-    |
-parse_and_enrich()    — parse fields from raw text, download images (local + images)
-    |
-apply_keywords()      — tag blacklist / interesting keywords (local, instant)
-    |
-export_to_csv()       — dump properties table to CSV
-```
-
-Run everything at once:
-
-```r
-source("web_scraper.R")   # entry point guard: runs only when executed directly
-# or interactively:
-scrape_raw()
-update_active_status()
-parse_and_enrich()
-apply_keywords()
-export_to_csv()
+1. scrape_raw()              fetch listing cards → raw_properties (network)
+2. update_active_status()    mark delisted properties inactive
+3. parse_and_enrich()        card text → structured fields, download images
+4. scrape_detail_pages()     fetch detail pages → richer fields  (network)
+   parse_detail_pages()        re-parse stored detail text (no network)
+5. apply_keywords()          tag blacklist / interesting keywords
+6. geolocate()               PLZ centroid → lat/lon  (needs AMTOVZ .gdb)
+7. enrich_gemeinde_bezirk()  PLZ → Gemeinde/Bezirk   (needs swissBOUNDARIES3D .gpkg)
+8. export_to_csv()           dump properties table to CSV
+   export_for_web()          write data/properties.js + data/plz.js for dashboard
 ```
 
 ---
@@ -108,6 +97,17 @@ parse_and_enrich(db_path = "rustico_properties.sqlite")
 - Safe to re-run: already up-to-date rows are skipped.
 - To re-parse everything from scratch: `DELETE FROM properties`, delete `images/`, then re-run.
 
+### Step 3b — `scrape_detail_pages()` / `parse_detail_pages()`
+
+```r
+scrape_detail_pages()   # fetch each listing's detail page + immediately re-parse
+parse_detail_pages()    # re-parse already-fetched detail text (no network calls)
+```
+
+`scrape_detail_pages()` fetches the full detail page for each listing, stores the raw
+text in `raw_properties.detail_text`, then calls `parse_detail_pages()` automatically.
+Use `parse_detail_pages()` alone whenever the parsing logic changes — no network needed.
+
 ### Step 4 — `apply_keywords()`
 
 ```r
@@ -122,14 +122,65 @@ Updates `blacklist_keywords`, `interesting_keywords`, and `is_blacklisted` on ev
 row in `properties`. Re-run any time you edit the keyword lists — no re-scraping
 or re-parsing needed.
 
-### Export
+### Step 5 — `geolocate()`
 
 ```r
-export_to_csv(
+geolocate(
   db_path  = "rustico_properties.sqlite",
-  filename = "rustico_properties.csv"
+  gdb_path = "data/AMTOVZ_GDB_LV95.gdb"
 )
 ```
+
+Computes the centroid of each property's ZIP polygon and writes `lat`/`lon` to
+`properties`. Requires the AMTOVZ geodatabase (gitignored — too large).
+
+### Step 6 — `enrich_gemeinde_bezirk()`
+
+```r
+enrich_gemeinde_bezirk(
+  db_path   = "rustico_properties.sqlite",
+  gpkg_path = "data/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg",  # default path
+  gdb_path  = "data/AMTOVZ_GDB_LV95.gdb"
+)
+
+# If the .gpkg is elsewhere on your system:
+enrich_gemeinde_bezirk(
+  gpkg_path = "/path/to/swissBOUNDARIES3D_1_5_LV95_LN02.gpkg"
+)
+```
+
+Spatial join: PLZ centroid → Gemeinde polygon → writes `gemeinde` + `bezirk` to
+`properties`. Requires `swissBOUNDARIES3D_1_5_LV95_LN02.gpkg` (gitignored).
+Once computed the data lives in SQLite — no need to re-run unless boundaries change.
+
+### Step 7 — Export
+
+```r
+export_to_csv()    # full properties table → rustico_properties.csv
+
+export_for_web()   # active properties + PLZ polygons → data/properties.js + data/plz.js
+                   # commit data/ afterwards to update GitHub Pages
+```
+
+### Precise geolocation (manual)
+
+When you know the exact location of a property (e.g. from the cadastral map), set it with:
+
+```r
+source("web_scraper.R")
+
+# listing_id: the numeric ID from the listing URL (e.g. "1003733924"),
+#             the full URL, or the integer DB id
+# easting/northing: Swiss coordinates in LV95 (~2.7M) or LV03 (~700K) — auto-detected
+set_precise_location("1003733924", 719738.875, 140367.281)
+
+# Then re-export so the dashboard picks it up
+export_for_web()
+```
+
+Coordinates are converted to WGS84 locally via the `sf` package (LV95/EPSG:2056 or LV03/EPSG:21781, auto-detected from magnitude).
+`export_for_web()` will use the precise coords instead of the PLZ centroid.
+On the map, precisely located properties show as solid markers; PLZ-centroid ones are semi-transparent with a dashed border.
 
 ---
 
@@ -279,6 +330,8 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 ## TODOs
 
 - **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view.
+- **Precise geolocation per listing** — implemented via `set_precise_location()`. See below.
+
 - **Parcel polygon overlay** — listings often include a screenshot of the cantonal cadastral map showing the parcel boundary. Pipeline:
   1. Identify which scraped image(s) show a cadastral/parcel map screenshot (vs. photos of the building) — requires a capable vision model, preferably local (e.g. LLaVA, Qwen-VL, or similar).
   2. Extract the parcel number from that image via OCR/vision inference.
@@ -294,8 +347,7 @@ All calls are free, no authentication required.
 ### Commune name + parcel number → EGRID + feature ID
 
 ```
-GET https://api3.geo.admin.ch/rest/services/ech/SearchServer
-    ?searchText={commune}+{parcel_number}&type=locations&origins=parcel
+GET https://api3.geo.admin.ch/rest/services/ech/SearchServer?searchText={commune}+{parcel_number}&type=locations&origins=parcel
 ```
 
 Example: `searchText=Aranno+357`

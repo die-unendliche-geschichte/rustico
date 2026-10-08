@@ -56,46 +56,30 @@
       background: #f0f3f7;
       border-bottom: 1px solid #ccc;
       display: flex;
-      flex-direction: column;
-      gap: 4px;
+      align-items: center;
+      gap: 5px;
       flex-shrink: 0;
       font-size: .78em;
+      overflow: visible;
     }
-    .fb-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .fb-label { font-weight: 600; color: #555; min-width: 62px; }
 
-    .fb-chip {
-      padding: 2px 9px;
+    .fb-filter { position: relative; }
+
+    .fb-btn {
+      padding: 3px 9px;
       border-radius: 10px;
       border: 1px solid #b0b8c4;
       background: #fff;
       cursor: pointer;
       font-size: inherit;
       color: #333;
+      white-space: nowrap;
       line-height: 1.6;
     }
-    .fb-chip:hover { background: #e8ecf1; }
-    .fb-chip.on { background: #1a2635; color: #fff; border-color: #1a2635; }
+    .fb-btn:hover { background: #e8ecf1; }
+    .fb-btn.on { background: #1a2635; color: #fff; border-color: #1a2635; }
 
-    /* Gemeinde dropdown */
-    #gemeinde-picker { position: relative; }
-    #gemeinde-btn {
-      padding: 2px 9px;
-      border-radius: 10px;
-      border: 1px solid #b0b8c4;
-      background: #fff;
-      cursor: pointer;
-      font-size: inherit;
-      color: #333;
-      line-height: 1.6;
-    }
-    #gemeinde-btn.on { background: #1a2635; color: #fff; border-color: #1a2635; }
-    #gemeinde-panel {
+    .fb-panel {
       display: none;
       position: absolute;
       top: calc(100% + 4px);
@@ -105,20 +89,22 @@
       border: 1px solid #ccc;
       border-radius: 6px;
       box-shadow: 0 4px 12px rgba(0,0,0,.15);
-      width: 220px;
-      max-height: 300px;
+      min-width: 180px;
+      max-height: 280px;
       flex-direction: column;
     }
-    #gemeinde-panel.open { display: flex; }
-    #gemeinde-search {
+    .fb-panel.open { display: flex; }
+
+    .fb-search {
       padding: 6px 10px;
       border: none;
       border-bottom: 1px solid #ddd;
       font-size: .9em;
       outline: none;
+      flex-shrink: 0;
     }
-    #gemeinde-list { overflow-y: auto; flex: 1; padding: 4px 0; }
-    .gem-item {
+    .fb-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+    .fb-item {
       display: flex;
       align-items: center;
       gap: 7px;
@@ -128,10 +114,9 @@
       white-space: nowrap;
       user-select: none;
     }
-    .gem-item:hover { background: #f0f3f7; }
+    .fb-item:hover { background: #f0f3f7; }
 
-    /* ── View toggle buttons ────────────────────────────────────────── */
-    /* "Karte →" button sitting right of the filter bar */
+    /* ── View toggle ────────────────────────────────────────────────── */
     #btn-show-map {
       margin-left: auto;
       padding: 3px 10px;
@@ -142,10 +127,10 @@
       font-size: inherit;
       color: #333;
       white-space: nowrap;
+      flex-shrink: 0;
     }
     #btn-show-map:hover { background: #e8ecf1; }
 
-    /* "← Tabelle" floating button on the map */
     #btn-show-table {
       display: none;
       position: absolute;
@@ -166,9 +151,7 @@
 
     /* ── Map popup ──────────────────────────────────────────────────── */
     .prop-popup { width: 210px; }
-    .prop-popup img {
-      width: 100%; border-radius: 4px; display: block; margin-bottom: 6px;
-    }
+    .prop-popup img { width: 100%; border-radius: 4px; display: block; margin-bottom: 6px; }
     .prop-popup .pop-title { font-weight: 600; font-size: .88em; line-height: 1.3; }
     .prop-popup .pop-price { color: #555; font-size: .82em; margin: 3px 0 5px; }
     .prop-popup a { font-size: .82em; }
@@ -184,21 +167,8 @@
 <div id="app">
   <div id="table-pane">
     <div id="filter-bar">
-      <div class="fb-row">
-        <span class="fb-label">Bezirk</span>
-        <div id="bezirk-chips" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
-      </div>
-      <div class="fb-row">
-        <span class="fb-label">Gemeinde</span>
-        <div id="gemeinde-picker">
-          <button id="gemeinde-btn">Alle ▾</button>
-          <div id="gemeinde-panel">
-            <input type="search" id="gemeinde-search" placeholder="Suchen…">
-            <div id="gemeinde-list"></div>
-          </div>
-        </div>
-        <button id="btn-show-map">Karte →</button>
-      </div>
+      <div id="filters"></div>
+      <button id="btn-show-map">Karte →</button>
     </div>
     <div id="grid" class="ag-theme-alpine"></div>
   </div>
@@ -238,15 +208,15 @@ const btnShowMap   = document.getElementById('btn-show-map');
 const btnShowTable = document.getElementById('btn-show-table');
 
 btnShowMap.addEventListener('click', () => {
-  tablePane.style.display = 'none';
-  divider.style.display   = 'none';
+  tablePane.style.display    = 'none';
+  divider.style.display      = 'none';
   btnShowTable.style.display = 'block';
   setTimeout(() => map.invalidateSize(), 10);
 });
 
 btnShowTable.addEventListener('click', () => {
-  tablePane.style.display = '';
-  divider.style.display   = '';
+  tablePane.style.display    = '';
+  divider.style.display      = '';
   btnShowTable.style.display = 'none';
 });
 
@@ -307,6 +277,13 @@ const plzLayer = L.geoJSON(PLZ_GEOJSON, {
   },
 });
 
+baseLayers['Kataster'] = L.tileLayer.wms('https://geodienste.ch/db/av_0/deu', {
+  layers:      'Aggregierte_Amtliche_Vermessung',
+  format:      'image/png',
+  transparent: false,
+  attribution: '© <a href="https://geodienste.ch">geodienste.ch</a>',
+});
+
 L.control.layers(baseLayers, { PLZ: plzLayer }, { collapsed: false }).addTo(map);
 
 const cluster    = L.markerClusterGroup({ maxClusterRadius: 40 });
@@ -326,8 +303,11 @@ ${price ? `<div class="pop-price">${price}</div>` : ''}
 <a href="${p.property_link}" target="_blank">Inserat öffnen →</a>
 </div>`;
 
+  const precise = p.location_precise === 1;
   const m = L.circleMarker([p.lat, p.lon], {
-    radius: 9, color: '#333', weight: 2, fillColor: '#e05c1a', fillOpacity: 0.9,
+    radius: 9, color: '#333', weight: 2,
+    fillColor: '#e05c1a', fillOpacity: precise ? 0.9 : 0.35,
+    dashArray: precise ? null : '4 3',
   }).bindPopup(popup, { maxWidth: 230 });
 
   markerById.set(p.id, m);
@@ -343,81 +323,116 @@ function syncMapToIds(visibleIds) {
   }
 }
 
-// ── External filters (Bezirk / Gemeinde) ─────────────────────────────────────
+// ── External filters ──────────────────────────────────────────────────────────
 
-const selBezirke   = new Set();
-const selGemeinden = new Set();
+const FILTER_DEFS = [
+  { field: 'bezirk',            label: 'Bezirk',        search: false },
+  { field: 'gemeinde',          label: 'Gemeinde',      search: true  },
+  { field: 'condition_cat',     label: 'Zustand',       search: false },
+  { field: 'noise_level_cat',   label: 'L\u00e4rm',     search: false },
+  { field: 'basement_yn',       label: 'Keller',        search: false },
+  { field: 'secondary_home_yn', label: 'Zweitwohnsitz', search: false },
+  { field: 'wasser_yn',         label: 'Wasser',        search: false },
+];
 
-const BEZIRKE   = [...new Set(PROPERTIES.map(p => p.bezirk).filter(Boolean))].sort();
-const GEMEINDEN = [...new Set(PROPERTIES.map(p => p.gemeinde).filter(Boolean))].sort();
+// Each entry: { field, sel: Set }
+const activeFilters = [];
+let onlyPrecise = false;
 
-// Bezirk chips
-BEZIRKE.forEach(b => {
-  const btn = document.createElement('button');
-  btn.className = 'fb-chip';
-  btn.textContent = b;
-  btn.addEventListener('click', () => {
-    if (selBezirke.has(b)) selBezirke.delete(b);
-    else selBezirke.add(b);
-    btn.classList.toggle('on', selBezirke.has(b));
-    gridApi.onFilterChanged();
+const filtersEl = document.getElementById('filters');
+filtersEl.style.cssText = 'display:flex;gap:5px;align-items:center;flex-wrap:nowrap;';
+
+FILTER_DEFS.forEach(({ field, label, search }) => {
+  const values = [...new Set(PROPERTIES.map(p => p[field]).filter(v => v != null && v !== ''))].sort();
+  if (values.length === 0) return;
+
+  const sel = new Set(values);   // all selected by default
+  activeFilters.push({ field, sel, total: values.length });
+
+  const wrap  = document.createElement('div');
+  wrap.className = 'fb-filter';
+
+  const btn   = document.createElement('button');
+  btn.className = 'fb-btn';
+  btn.textContent = `${label} \u25be`;
+  wrap.appendChild(btn);
+
+  const panel = document.createElement('div');
+  panel.className = 'fb-panel';
+
+  let searchInput = null;
+  if (search) {
+    searchInput = document.createElement('input');
+    searchInput.type = 'search';
+    searchInput.className = 'fb-search';
+    searchInput.placeholder = 'Suchen\u2026';
+    panel.appendChild(searchInput);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'fb-list';
+  panel.appendChild(list);
+  wrap.appendChild(panel);
+  filtersEl.appendChild(wrap);
+
+  function updateBtn() {
+    const allOn = sel.size === values.length;
+    btn.textContent = allOn
+      ? `${label} \u25be`
+      : `${label} (${sel.size}/${values.length}) \u25be`;
+    btn.classList.toggle('on', !allOn);
+  }
+
+  function buildList(query = '') {
+    const q = query.toLowerCase();
+    list.innerHTML = '';
+    values
+      .filter(v => !q || v.toLowerCase().includes(q))
+      .forEach(v => {
+        const lbl = document.createElement('label');
+        lbl.className = 'fb-item';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = sel.has(v);
+        cb.addEventListener('change', () => {
+          if (cb.checked) sel.add(v); else sel.delete(v);
+          updateBtn();
+          gridApi.onFilterChanged();
+        });
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(v));
+        list.appendChild(lbl);
+      });
+  }
+
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    document.querySelectorAll('.fb-panel.open').forEach(p => { if (p !== panel) p.classList.remove('open'); });
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) {
+      buildList(searchInput ? searchInput.value : '');
+      if (searchInput) searchInput.focus();
+    }
   });
-  document.getElementById('bezirk-chips').appendChild(btn);
+
+  if (searchInput) searchInput.addEventListener('input', () => buildList(searchInput.value));
 });
 
-// Gemeinde searchable dropdown
-const gemBtn    = document.getElementById('gemeinde-btn');
-const gemPanel  = document.getElementById('gemeinde-panel');
-const gemSearch = document.getElementById('gemeinde-search');
-const gemList   = document.getElementById('gemeinde-list');
+document.addEventListener('click', () => {
+  document.querySelectorAll('.fb-panel.open').forEach(p => p.classList.remove('open'));
+});
 
-function buildGemList(query = '') {
-  const q = query.toLowerCase();
-  gemList.innerHTML = '';
-  GEMEINDEN.filter(g => g.toLowerCase().includes(q)).forEach(g => {
-    const lbl = document.createElement('label');
-    lbl.className = 'gem-item';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = selGemeinden.has(g);
-    cb.addEventListener('change', () => {
-      if (cb.checked) selGemeinden.add(g);
-      else selGemeinden.delete(g);
-      updateGemBtn();
-      gridApi.onFilterChanged();
-    });
-    lbl.appendChild(cb);
-    lbl.appendChild(document.createTextNode(g));
-    gemList.appendChild(lbl);
-  });
-}
-
-function updateGemBtn() {
-  if (selGemeinden.size === 0) {
-    gemBtn.textContent = 'Alle ▾';
-    gemBtn.classList.remove('on');
-  } else {
-    gemBtn.textContent = `${selGemeinden.size} ausgewählt ▾`;
-    gemBtn.classList.add('on');
-  }
-}
-
-gemBtn.addEventListener('click', e => {
+// ── Precise-location toggle ───────────────────────────────────────────────────
+const preciseBtn = document.createElement('button');
+preciseBtn.className = 'fb-btn';
+preciseBtn.textContent = 'Exakte Lage';
+preciseBtn.addEventListener('click', e => {
   e.stopPropagation();
-  gemPanel.classList.toggle('open');
-  if (gemPanel.classList.contains('open')) {
-    buildGemList(gemSearch.value);
-    gemSearch.focus();
-  }
+  onlyPrecise = !onlyPrecise;
+  preciseBtn.classList.toggle('on', onlyPrecise);
+  gridApi.onFilterChanged();
 });
-
-gemSearch.addEventListener('input', () => buildGemList(gemSearch.value));
-
-document.addEventListener('click', e => {
-  if (!document.getElementById('gemeinde-picker').contains(e.target)) {
-    gemPanel.classList.remove('open');
-  }
-});
+filtersEl.appendChild(preciseBtn);
 
 // ── Grid ─────────────────────────────────────────────────────────────────────
 
@@ -449,8 +464,8 @@ const colDefs = [
   },
   { field: 'living_area_m2', headerName: 'Wohn m²',  width: 88,  filter: 'agNumberColumnFilter' },
   { field: 'plot_area_m2',   headerName: 'Grund m²', width: 88,  filter: 'agNumberColumnFilter' },
-  { field: 'gemeinde', headerName: 'Gemeinde', width: 130, floatingFilter: false },
-  { field: 'bezirk',   headerName: 'Bezirk',   width: 130, floatingFilter: false },
+  { field: 'gemeinde',       headerName: 'Gemeinde', width: 130, floatingFilter: false },
+  { field: 'bezirk',         headerName: 'Bezirk',   width: 130, floatingFilter: false },
 ];
 
 // ── Grid init ─────────────────────────────────────────────────────────────────
@@ -470,13 +485,16 @@ const gridApi = agGrid.createGrid(document.getElementById('grid'), {
   floatingFiltersHeight: 32,
   suppressCellFocus:     true,
   isExternalFilterPresent() {
-    return selBezirke.size > 0 || selGemeinden.size > 0;
+    return onlyPrecise || activeFilters.some(f => f.sel.size < f.total);
   },
   doesExternalFilterPass(node) {
-    const { gemeinde, bezirk } = node.data;
-    if (selBezirke.size > 0   && !selBezirke.has(bezirk))     return false;
-    if (selGemeinden.size > 0 && !selGemeinden.has(gemeinde)) return false;
-    return true;
+    if (onlyPrecise && !node.data.location_precise) return false;
+    return activeFilters.every(({ field, sel, total }) => {
+      if (sel.size === total) return true;          // all selected — no filtering
+      const v = node.data[field];
+      if (v == null || v === '') return true;       // unknown values always pass
+      return sel.has(v);
+    });
   },
   getRowStyle(p) {
     if (p.data.blacklist_keywords)   return { background: '#fff0f0' };

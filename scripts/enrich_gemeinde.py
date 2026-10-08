@@ -80,12 +80,17 @@ cur.execute("""
     SELECT p.id, p.postal_code, p.city, p.region,
            p.price_chf, p.living_area_m2, p.plot_area_m2,
            p.rooms_n, p.wc_n, p.bathrooms_n, p.floors_n,
-           p.build_year_n, p.condition, p.secondary_home, p.parking,
-           p.lage, p.ausblick,
+           p.build_year_n,
+           p.condition, p.condition_cat,
+           p.secondary_home, p.secondary_home_yn,
+           p.noise_level_cat, p.basement_yn, p.wasser_yn,
+           p.parking, p.lage, p.ausblick,
            p.public_transport_m, p.dist_highway_km, p.dist_city_km,
            p.schools, p.garden,
            p.interesting_keywords, p.blacklist_keywords,
-           p.lat, p.lon,
+           COALESCE(p.lat_precise, p.lat) AS lat,
+           COALESCE(p.lon_precise, p.lon) AS lon,
+           CASE WHEN p.lat_precise IS NOT NULL THEN 1 ELSE 0 END AS location_precise,
            r.property_link
     FROM properties p
     JOIN raw_properties r ON r.id = p.raw_id
