@@ -329,7 +329,7 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 
 ## TODOs
 
-- **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view.
+- **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico", "favorite") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view. 
 - **Precise geolocation per listing** — implemented via `set_precise_location()`. See below.
 
 - **PLZ-polygon map with precise-location point overlay** — the current clustered circle markers are a holdover from the Quarto/Crosstalk prototype. With pure JS this can be done better: use filter-aware coloured PLZ polygons as the primary map layer (one polygon per PLZ, colour/opacity encoding e.g. count or median price of visible listings), and only show individual point markers for listings with `location_precise = true`. Clicking a polygon would highlight its listings in the grid; precise-location markers keep their existing popup. This removes the need for marker clustering entirely.

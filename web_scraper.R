@@ -1280,17 +1280,18 @@ enrich_gemeinde_bezirk <- function(
 #     • the 10-digit numeric ID from the listing URL  (e.g. "1003733924")
 #     • the full listing URL
 #     • the integer database id
-# easting / northing  — Swiss coordinates in either LV95 (easting ~2.6M–2.8M)
-#     or LV03 (easting ~480K–840K).  The system is auto-detected from magnitude.
+# easting / northing  — Swiss coordinates. CRS is auto-detected from magnitude
+#     (LV95/EPSG:2056 if easting > 1e6, else LV03/EPSG:21781) but can be set
+#     explicitly with the crs argument.
 #
-# Calls the swisstopo free reframe REST API to convert to WGS84 and writes
-# lat_precise / lon_precise into the properties table.  Run export_for_web()
-# afterwards to push the update to the dashboard.
+# Writes lat_precise / lon_precise into the properties table.
+# Run export_for_web() afterwards to push the update to the dashboard.
 #
 # Example:
 #   set_precise_location("1003733924", 719738.875, 140367.281)
 #   set_precise_location("1003721211", 2719964.64, 1142660.87)
-set_precise_location <- function(listing_id, easting, northing,
+#   set_precise_location("1003733924", 719738.875, 140367.281, crs = 21781)
+set_precise_location <- function(listing_id, easting, northing, crs = NULL,
                                   db_path = "rustico_properties.sqlite") {
   if (!requireNamespace("sf", quietly = TRUE))
     stop("Package 'sf' is required: install.packages('sf')")
@@ -1327,8 +1328,7 @@ set_precise_location <- function(listing_id, easting, northing,
   prop_id <- row$id[1]
 
   # ── Convert coordinates to WGS84 via sf ────────────────────────────────────
-  # Auto-detect LV95 (easting > 1e6, EPSG:2056) vs LV03 (EPSG:21781)
-  crs_in <- if (easting > 1e6) 2056 else 21781
+  crs_in <- if (!is.null(crs)) as.integer(crs) else if (easting > 1e6) 2056L else 21781L
   pt_wgs <- sf::st_transform(
     sf::st_sfc(sf::st_point(c(easting, northing)), crs = crs_in), 4326
   )
