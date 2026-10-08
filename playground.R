@@ -2,16 +2,35 @@ library(DBI)
 library(RSQLite)
 con <- dbConnect(SQLite(), "rustico_properties.sqlite")
 
+# ── Browse raw data ───────────────────────────────────────────────────────────
+
+# All 426 rows — card text + detail page text
 dbGetQuery(
   con,
-  "SELECT * FROM raw_properties WHERE property_link = 'https://...'"
+  "SELECT id, property_link, length(raw_text), length(detail_text) FROM raw_properties"
 )
-# or by id:
-dbGetQuery(con, "SELECT raw_text FROM raw_properties WHERE id = 42")
 
+# Read the detail page text for a specific listing
+row <- dbGetQuery(con, "SELECT * FROM raw_properties WHERE id = 1")
+cat(row$detail_text)
+
+# Search detail text across all listings
+dbGetQuery(
+  con,
+  "SELECT id, property_link FROM raw_properties WHERE detail_text LIKE '%parzelle%'"
+)
+
+# ── Structured data ──────────────────────────────────────────────────────────
+
+# All parsed properties (59 columns)
+props <- dbGetQuery(con, "SELECT * FROM properties")
+
+# Quick look at a single row
+props[1, ]
+
+colnames(props)
+
+props$secondary_home
+
+# ── Disconnect ────────────────────────────────────────────────────────────────
 dbDisconnect(con)
-# The most useful column is `raw_text` — it's the full `html_text()` of the listing card as scraped. If you want to see how it was parsed:
-
-source("web_scraper.R")
-row <- dbGetQuery(con, "SELECT * FROM raw_properties WHERE id = 42")
-parse_property_text(row$raw_text)
