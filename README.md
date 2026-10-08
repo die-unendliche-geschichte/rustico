@@ -332,6 +332,12 @@ Requires `data/AMTOVZ_GDB_LV95.gdb` (Swiss official ZIP polygon dataset) for the
 - **Tag system for listings** — allow adding/removing tags per listing (e.g. "alleinlage", "dorfrustico") directly in the dashboard, persisted to the database, so items can be quickly included or excluded from view.
 - **Precise geolocation per listing** — implemented via `set_precise_location()`. See below.
 
+- **PLZ-polygon map with precise-location point overlay** — the current clustered circle markers are a holdover from the Quarto/Crosstalk prototype. With pure JS this can be done better: use filter-aware coloured PLZ polygons as the primary map layer (one polygon per PLZ, colour/opacity encoding e.g. count or median price of visible listings), and only show individual point markers for listings with `location_precise = true`. Clicking a polygon would highlight its listings in the grid; precise-location markers keep their existing popup. This removes the need for marker clustering entirely.
+
+- **6911 Campione d'Italia** — Italian exclave with a Swiss postal code. Listings there are geographically in Italy and don't fit the current Ticino-focused setup (wrong canton assignment, no Gemeinde/Bezirk match). Options: filter them out during export, flag them with a dedicated tag, or handle the PLZ separately in the geolocation pipeline. See also the Known data gaps section.
+
+- **Bezirk/Gemeinde hierarchy in filters** — currently Bezirk and Gemeinde are independent flat filters. Consider linking them: selecting a Bezirk should narrow the Gemeinde options to only those within it, and vice versa. Requires the filters to share state and re-render each other on change.
+
 - **Parcel polygon overlay** — listings often include a screenshot of the cantonal cadastral map showing the parcel boundary. Pipeline:
   1. Identify which scraped image(s) show a cadastral/parcel map screenshot (vs. photos of the building) — requires a capable vision model, preferably local (e.g. LLaVA, Qwen-VL, or similar).
   2. Extract the parcel number from that image via OCR/vision inference.

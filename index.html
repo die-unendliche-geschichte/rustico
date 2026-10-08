@@ -104,6 +104,16 @@
       flex-shrink: 0;
     }
     .fb-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+    .fb-toggle {
+      padding: 4px 10px;
+      font-size: .8em;
+      color: #557;
+      cursor: pointer;
+      border-bottom: 1px solid #eee;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .fb-toggle:hover { background: #f0f3f7; }
     .fb-item {
       display: flex;
       align-items: center;
@@ -369,6 +379,10 @@ FILTER_DEFS.forEach(({ field, label, search }) => {
     panel.appendChild(searchInput);
   }
 
+  const toggleRow = document.createElement('div');
+  toggleRow.className = 'fb-toggle';
+  panel.appendChild(toggleRow);
+
   const list = document.createElement('div');
   list.className = 'fb-list';
   panel.appendChild(list);
@@ -385,10 +399,19 @@ FILTER_DEFS.forEach(({ field, label, search }) => {
 
   function buildList(query = '') {
     const q = query.toLowerCase();
+    const visible = values.filter(v => !q || v.toLowerCase().includes(q));
+    const allVisibleOn = visible.every(v => sel.has(v));
+    toggleRow.textContent = allVisibleOn ? 'Keine' : 'Alle';
+    toggleRow.onclick = e => {
+      e.stopPropagation();
+      if (allVisibleOn) visible.forEach(v => sel.delete(v));
+      else              visible.forEach(v => sel.add(v));
+      updateBtn();
+      gridApi.onFilterChanged();
+      buildList(query);
+    };
     list.innerHTML = '';
-    values
-      .filter(v => !q || v.toLowerCase().includes(q))
-      .forEach(v => {
+    visible.forEach(v => {
         const lbl = document.createElement('label');
         lbl.className = 'fb-item';
         const cb = document.createElement('input');
@@ -398,6 +421,7 @@ FILTER_DEFS.forEach(({ field, label, search }) => {
           if (cb.checked) sel.add(v); else sel.delete(v);
           updateBtn();
           gridApi.onFilterChanged();
+          toggleRow.textContent = visible.every(v2 => sel.has(v2)) ? 'Keine' : 'Alle';
         });
         lbl.appendChild(cb);
         lbl.appendChild(document.createTextNode(v));
