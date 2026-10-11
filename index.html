@@ -165,6 +165,19 @@
     .prop-popup .pop-title { font-weight: 600; font-size: .88em; line-height: 1.3; }
     .prop-popup .pop-price { color: #555; font-size: .82em; margin: 3px 0 5px; }
     .prop-popup a { font-size: .82em; }
+
+    /* ── PLZ click popup ─────────────────────────────────────────────── */
+    .plz-popup { width: 260px; }
+    .plz-popup-title { font-weight: 700; font-size: .85em; margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px solid #ddd; color: #1a2635; }
+    .plz-popup-title span { font-weight: 400; color: #666; }
+    .plz-scroll { max-height: 300px; overflow-y: auto; }
+    .plz-listing { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; border-bottom: 1px solid #f0f0f0; }
+    .plz-listing:last-child { border-bottom: none; }
+    .plz-listing img { width: 68px; height: 50px; object-fit: cover; border-radius: 3px; flex-shrink: 0; background: #eee; }
+    .plz-listing-info { flex: 1; min-width: 0; }
+    .plz-listing-title { font-size: .78em; font-weight: 500; line-height: 1.3; margin-bottom: 2px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .plz-listing-price { font-size: .75em; color: #e05c1a; font-weight: 600; margin-bottom: 3px; }
+    .plz-listing a { font-size: .75em; }
   </style>
 </head>
 <body>
@@ -201,7 +214,8 @@
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function titleFromLink(link) {
-  const slug = (link ?? '').split('/').pop().split('?')[0];
+  let slug = (link ?? '').split('/').pop().split('?')[0];
+  try { slug = decodeURIComponent(slug); } catch {}
   return slug.replace(/[-_]\d{5,}$/, '').replace(/[-_]+/g, ' ').trim();
 }
 
@@ -261,6 +275,37 @@ btnShowTable.addEventListener('click', () => {
   });
 })();
 
+// ── PLZ data ──────────────────────────────────────────────────────────────────
+
+// postal_code → Set<id> for all listings
+const plzIds = new Map();
+PROPERTIES.forEach(p => {
+  if (!p.postal_code) return;
+  const code = String(p.postal_code);
+  if (!plzIds.has(code)) plzIds.set(code, new Set());
+  plzIds.get(code).add(p.id);
+});
+
+// postal_code → { gemeinde, bezirk } (first non-null values found)
+const plzMeta = new Map();
+PROPERTIES.forEach(p => {
+  if (!p.postal_code) return;
+  const code = String(p.postal_code);
+  if (!plzMeta.has(code)) plzMeta.set(code, { gemeinde: p.gemeinde ?? '', bezirk: p.bezirk ?? '' });
+});
+
+const plzTotalMax     = Math.max(1, ...[...plzIds.values()].map(s => s.size));
+const plzCountVisible = new Map();   // postal_code → visible count; updated in syncMapToIds
+let   currentVisibleIds = new Set(PROPERTIES.map(p => p.id));
+
+function plzStyle(feature) {
+  const code  = String(feature.properties.postal_code);
+  const count = plzCountVisible.get(code) ?? 0;
+  if (count === 0) return { fillColor: '#aaa', fillOpacity: 0.12, color: '#999', weight: 1 };
+  const t = count / plzTotalMax;
+  return { fillColor: '#e05c1a', fillOpacity: 0.2 + t * 0.6, color: '#c04010', weight: 1.5 };
+}
+
 // ── Map ───────────────────────────────────────────────────────────────────────
 
 const swAttr = '© <a href="https://www.swisstopo.admin.ch">swisstopo</a>';
@@ -279,11 +324,47 @@ const baseLayers = {
 baseLayers['Swisstopo Grey'].addTo(map);
 
 const plzLayer = L.geoJSON(PLZ_GEOJSON, {
-  style: { color: '#555', weight: 1, fillColor: '#aaa', fillOpacity: 0.4 },
+  style: plzStyle,
   onEachFeature(feature, layer) {
-    layer.bindTooltip(feature.properties.postal_code);
-    layer.on('mouseover', () => layer.setStyle({ weight: 3, color: '#000', fillOpacity: 0.6 }));
-    layer.on('mouseout',  () => plzLayer.resetStyle(layer));
+    const code  = String(feature.properties.postal_code);
+    const total = plzIds.get(code)?.size ?? 0;
+    layer.bindTooltip('', { sticky: true });
+    layer.on('mouseover', () => {
+      const meta    = plzMeta.get(code);
+      const visible = plzCountVisible.get(code) ?? 0;
+      const loc     = meta?.gemeinde ? `${meta.gemeinde}${meta.bezirk ? ` · ${meta.bezirk}` : ''}` : '';
+      layer.setTooltipContent(
+        `<strong>${code}</strong>${loc ? `<br>${loc}` : ''}<br>${visible} / ${total} Inserate`
+      );
+      layer.setStyle({ weight: 3, color: '#000' });
+    });
+    layer.on('mouseout', () => plzLayer.resetStyle(layer));
+    layer.on('click', e => {
+      const ids     = plzIds.get(code);
+      if (!ids) return;
+      const visible = PROPERTIES.filter(p => ids.has(p.id) && currentVisibleIds.has(p.id));
+      if (visible.length === 0) return;
+      const meta    = plzMeta.get(code);
+      const loc     = meta?.gemeinde ? ` · ${meta.gemeinde}${meta.bezirk ? ` (${meta.bezirk})` : ''}` : '';
+      let html = `<div class="plz-popup">
+        <div class="plz-popup-title">${code}${loc} <span>· ${visible.length} Inserat${visible.length !== 1 ? 'e' : ''}</span></div>
+        <div class="plz-scroll">`;
+      for (const p of visible) {
+        const slug  = (p.property_link ?? '').split('/').pop().split('?')[0];
+        const title = titleFromLink(p.property_link);
+        const price = p.price_chf != null ? fmtCHF(p.price_chf) : '';
+        html += `<div class="plz-listing">
+          <img src="images/${slug}.jpg" onerror="this.style.display='none'">
+          <div class="plz-listing-info">
+            <div class="plz-listing-title">${title}</div>
+            ${price ? `<div class="plz-listing-price">${price}</div>` : ''}
+            <a href="${p.property_link}" target="_blank">Öffnen →</a>
+          </div>
+        </div>`;
+      }
+      html += '</div></div>';
+      L.popup({ maxWidth: 280 }).setLatLng(e.latlng).setContent(html).openOn(map);
+    });
   },
 });
 
@@ -294,13 +375,19 @@ baseLayers['Kataster'] = L.tileLayer.wms('https://geodienste.ch/db/av_0/deu', {
   attribution: '© <a href="https://geodienste.ch">geodienste.ch</a>',
 });
 
+plzLayer.addTo(map);
 L.control.layers(baseLayers, { PLZ: plzLayer }, { collapsed: false }).addTo(map);
+
+// postal_code → Leaflet layer (for row-click zoom)
+const plzLayerMap = new Map();
+plzLayer.eachLayer(l => plzLayerMap.set(String(l.feature.properties.postal_code), l));
 
 const cluster    = L.markerClusterGroup({ maxClusterRadius: 40 });
 const markerById = new Map();
 
 PROPERTIES.forEach(p => {
   if (p.lat == null || p.lon == null) return;
+  if (!p.location_precise) return;
 
   const slug  = (p.property_link ?? '').split('/').pop().split('?')[0];
   const title = titleFromLink(p.property_link);
@@ -327,10 +414,20 @@ ${price ? `<div class="pop-price">${price}</div>` : ''}
 map.addLayer(cluster);
 
 function syncMapToIds(visibleIds) {
+  currentVisibleIds = visibleIds;
+
   cluster.clearLayers();
   for (const [id, m] of markerById) {
     if (visibleIds.has(id)) cluster.addLayer(m);
   }
+
+  plzCountVisible.clear();
+  for (const [code, ids] of plzIds) {
+    let n = 0;
+    for (const id of ids) if (visibleIds.has(id)) n++;
+    if (n > 0) plzCountVisible.set(code, n);
+  }
+  plzLayer.setStyle(plzStyle);
 }
 
 // ── External filters ──────────────────────────────────────────────────────────
@@ -532,13 +629,18 @@ const gridApi = agGrid.createGrid(document.getElementById('grid'), {
   },
   onGridReady(e) {
     e.api.sizeColumnsToFit();
+    syncMapToIds(new Set(PROPERTIES.map(p => p.id)));
     countEl.textContent = `${PROPERTIES.length} Inserate`;
   },
   onRowClicked(e) {
     const m = markerById.get(e.data.id);
-    if (!m) return;
-    map.setView(m.getLatLng(), 13, { animate: true });
-    m.openPopup();
+    if (m) {
+      map.setView(m.getLatLng(), 13, { animate: true });
+      m.openPopup();
+      return;
+    }
+    const plzL = plzLayerMap.get(String(e.data.postal_code ?? ''));
+    if (plzL) map.fitBounds(plzL.getBounds(), { animate: true });
   },
 });
 </script>
